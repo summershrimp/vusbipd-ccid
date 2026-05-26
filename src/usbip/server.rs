@@ -1,18 +1,17 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
-use tokio::{
-    io::AsyncReadExt,
-    net::{TcpListener, TcpStream},
-    sync::Mutex,
-};
-use tracing::{debug, info, warn};
+use tracing::info;
 
 use crate::ccid::CcidBridge;
 
+use super::device::build_virtual_ccid_device;
+
 pub struct UsbIpServer {
     listen_addr: SocketAddr,
-    #[allow(dead_code)]
     bridge: Arc<Mutex<CcidBridge>>,
 }
 
@@ -25,34 +24,11 @@ impl UsbIpServer {
     }
 
     pub async fn run(self) -> Result<()> {
-        let listener = TcpListener::bind(self.listen_addr).await?;
-        info!(listen_addr = %self.listen_addr, "USB/IP listener bound");
+        let device = build_virtual_ccid_device(self.bridge);
+        let server = Arc::new(::usbip::UsbIpServer::new_simulated(vec![device]));
 
-        loop {
-            let (stream, peer_addr) = listener.accept().await?;
-            debug!(%peer_addr, "accepted USB/IP client connection");
-            tokio::spawn(async move {
-                if let Err(error) = handle_client(stream).await {
-                    warn!(%peer_addr, ?error, "USB/IP client handler ended with error");
-                }
-            });
-        }
+        info!(listen_addr = %self.listen_addr, "USB/IP server ready with virtual CCID device");
+        ::usbip::server(self.listen_addr, server).await;
+        Ok(())
     }
-}
-
-async fn handle_client(mut stream: TcpStream) -> Result<()> {
-    let mut probe = [0u8; 4];
-    let bytes_read = stream.read(&mut probe).await?;
-
-    if bytes_read == 0 {
-        return Ok(());
-    }
-
-    warn!(
-        bytes_read,
-        first_bytes = ?&probe[..bytes_read],
-        "USB/IP protocol handling is not implemented yet; closing connection"
-    );
-
-    Ok(())
 }

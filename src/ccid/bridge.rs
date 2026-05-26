@@ -24,7 +24,7 @@ impl CcidBridge {
         }
     }
 
-    pub async fn handle_command(&mut self, command: CcidCommand) -> CcidResponse {
+    pub fn handle_command(&mut self, command: CcidCommand) -> CcidResponse {
         match command {
             CcidCommand::IccPowerOn {
                 slot,
@@ -32,7 +32,7 @@ impl CcidBridge {
                 power_select,
             } => {
                 debug!(slot, seq, power_select, "handling CCID power on");
-                match self.reader.poll_card().await {
+                match self.reader.poll_card() {
                     Ok(Some(card)) => {
                         let atr = Self::build_pseudo_atr(&card);
                         self.current_card = Some(card);
@@ -70,7 +70,7 @@ impl CcidBridge {
             }
             CcidCommand::IccPowerOff { slot, seq } => {
                 debug!(slot, seq, "handling CCID power off");
-                if let Err(error) = self.reader.power_off().await {
+                if let Err(error) = self.reader.power_off() {
                     warn!(?error, "NFC power-off flow failed");
                     return CcidResponse::SlotStatus {
                         slot,
@@ -92,7 +92,7 @@ impl CcidBridge {
             }
             CcidCommand::GetSlotStatus { slot, seq } => {
                 debug!(slot, seq, "handling CCID slot status request");
-                match self.reader.poll_card().await {
+                match self.reader.poll_card() {
                     Ok(card) => {
                         let icc_status = if card.is_some() {
                             IccStatus::Active
@@ -136,7 +136,7 @@ impl CcidBridge {
                     "handling CCID APDU exchange"
                 );
 
-                match self.reader.exchange_apdu(&payload).await {
+                match self.reader.exchange_apdu(&payload) {
                     Ok(response) => CcidResponse::DataBlock {
                         slot,
                         seq,
@@ -205,8 +205,6 @@ impl CcidBridge {
 mod tests {
     use std::{collections::VecDeque, time::Duration};
 
-    use async_trait::async_trait;
-
     use crate::{
         ccid::protocol::{CcidCommand, CcidResponse, IccStatus, SlotStatus},
         nfc::{CardPresence, CardProtocol, NfcReader, ReaderCapabilities, ReaderError},
@@ -219,7 +217,6 @@ mod tests {
         exchange_result: Result<Vec<u8>, ReaderError>,
     }
 
-    #[async_trait]
     impl NfcReader for FakeReader {
         fn capabilities(&self) -> ReaderCapabilities {
             ReaderCapabilities {
@@ -229,21 +226,21 @@ mod tests {
             }
         }
 
-        async fn poll_card(&mut self) -> Result<Option<CardPresence>, ReaderError> {
+        fn poll_card(&mut self) -> Result<Option<CardPresence>, ReaderError> {
             self.poll_results.pop_front().unwrap_or_else(|| Ok(None))
         }
 
-        async fn power_off(&mut self) -> Result<(), ReaderError> {
+        fn power_off(&mut self) -> Result<(), ReaderError> {
             Ok(())
         }
 
-        async fn exchange_apdu(&mut self, _apdu: &[u8]) -> Result<Vec<u8>, ReaderError> {
+        fn exchange_apdu(&mut self, _apdu: &[u8]) -> Result<Vec<u8>, ReaderError> {
             self.exchange_result.clone()
         }
     }
 
-    #[tokio::test]
-    async fn power_on_returns_data_block_when_card_exists() {
+    #[test]
+    fn power_on_returns_data_block_when_card_exists() {
         let card = CardPresence {
             uid: vec![0x01, 0x02, 0x03, 0x04],
             protocol: CardProtocol::IsoDep,
@@ -256,13 +253,11 @@ mod tests {
         };
         let mut bridge = CcidBridge::new(Box::new(reader), Duration::from_millis(100));
 
-        let response = bridge
-            .handle_command(CcidCommand::IccPowerOn {
-                slot: 0,
-                seq: 7,
-                power_select: 0,
-            })
-            .await;
+        let response = bridge.handle_command(CcidCommand::IccPowerOn {
+            slot: 0,
+            seq: 7,
+            power_select: 0,
+        });
 
         match response {
             CcidResponse::DataBlock {

@@ -1,4 +1,5 @@
 use clap::Parser;
+use tracing_log::LogTracer;
 use vusbipd_ccid::{
     app::Application,
     config::{AppConfig, Cli},
@@ -14,8 +15,9 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
+    let _ = LogTracer::init();
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info,vusbipd_ccid=debug".into());
+        .unwrap_or_else(|_| "info,usbip=info,vusbipd_ccid=debug".into());
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)

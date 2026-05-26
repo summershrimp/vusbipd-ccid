@@ -11,6 +11,23 @@ We need a server-side USB/IP implementation that exports a virtual CCID reader i
 - First reader backend: PN532 over UART.
 - The code must be ready for additional reader backends later.
 - Keep USB/IP, CCID, and reader-specific logic separated.
+- Reuse existing Rust crates where possible to avoid reimplementing mature protocol pieces.
+
+## Selected Crate Strategy
+
+The current direction is to lean on these crates:
+
+- `usbip 0.8.0` for the USB/IP server and simulated USB device model.
+- `pn532` for PN532 command transport and response parsing.
+- `usbd-ccid` plus `apdu-dispatch` as the main CCID/APDU reference stack.
+- `usbd-ctaphid` plus `ctaphid-dispatch` as a future FIDO HID path if exporting CTAPHID becomes necessary.
+
+Important caveat: the `usbd-*` crates are designed around `usb-device` and embedded USB buses. They cannot be plugged directly into a host-side USB/IP server. For this project they are mainly valuable as:
+
+- protocol references,
+- behavior references,
+- message sizing references,
+- future adapter targets if we build a compatibility layer.
 
 ## Layered Structure
 
@@ -19,8 +36,7 @@ We need a server-side USB/IP implementation that exports a virtual CCID reader i
 Responsibilities:
 
 - own TCP listening and connection lifecycle,
-- parse USB/IP protocol frames,
-- expose a virtual USB device model,
+- reuse the `usbip` crate's server and simulated device model,
 - route bulk/control traffic to the CCID device model.
 
 This layer should not know anything about PN532.
@@ -43,7 +59,8 @@ Responsibilities:
 - abstract reader discovery / opening / configuration,
 - detect card presence,
 - exchange APDUs with an NFC token,
-- translate backend-specific protocols into a common reader API.
+- translate backend-specific protocols into a common reader API,
+- use crate-backed protocol implementations where possible instead of custom frame parsing.
 
 Reader-specific code, such as PN532 framing or UART transport, belongs here.
 
@@ -63,12 +80,17 @@ This trait is intentionally focused on capabilities that the CCID layer needs in
 
 1. Parse CLI/config.
 2. Open the configured NFC backend.
-3. Start the USB/IP listener.
+3. Build a virtual CCID USB device on top of the `usbip` crate.
+4. Start the USB/IP listener.
 4. When the client issues CCID commands:
    - `IccPowerOn` triggers card detection and returns a pseudo ATR.
    - `GetSlotStatus` reports card presence.
    - `XfrBlock` forwards APDU payloads to the NFC backend.
 5. The NFC backend talks to the physical reader and returns APDU responses.
+
+## Why The Additional CTAPHID Crates Were Added
+
+The mainline path is still CCID-over-USB/IP. However, FIDO tokens are not always best represented through CCID only. Adding `usbd-ctaphid` and `ctaphid-dispatch` now gives us a ready reference path for a future alternative USB personality that may better match WebAuthn/FIDO expectations on some hosts.
 
 ## Notes on YubiKey over NFC
 

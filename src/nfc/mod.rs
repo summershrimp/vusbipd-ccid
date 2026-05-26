@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use thiserror::Error;
 
 pub mod pn532;
@@ -24,22 +23,20 @@ pub struct ReaderCapabilities {
     pub supports_apdu_exchange: bool,
 }
 
-#[async_trait]
 pub trait NfcReader: Send {
     fn capabilities(&self) -> ReaderCapabilities;
 
-    async fn poll_card(&mut self) -> Result<Option<CardPresence>, ReaderError>;
+    fn poll_card(&mut self) -> Result<Option<CardPresence>, ReaderError>;
 
-    async fn power_off(&mut self) -> Result<(), ReaderError>;
+    fn power_off(&mut self) -> Result<(), ReaderError>;
 
-    async fn exchange_apdu(&mut self, apdu: &[u8]) -> Result<Vec<u8>, ReaderError>;
+    fn exchange_apdu(&mut self, apdu: &[u8]) -> Result<Vec<u8>, ReaderError>;
 }
 
-#[async_trait]
 pub trait ReaderFactory: Send + Sync {
     fn backend_name(&self) -> &'static str;
 
-    async fn open(&self) -> Result<Box<dyn NfcReader>, ReaderError>;
+    fn open(&self) -> Result<Box<dyn NfcReader>, ReaderError>;
 }
 
 #[derive(Debug, Error, Clone)]

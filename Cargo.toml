@@ -5,10 +5,16 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
-async-trait = "0.1"
+apdu-dispatch = { version = "0.4.0", features = ["std"] }
 clap = { version = "4.5", features = ["derive"] }
+ctaphid-dispatch = { version = "0.4.0", features = ["std"] }
+pn532 = { version = "0.5.0", features = ["std"] }
+serialport = "4.0"
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
-tokio-serial = "5.4"
+tokio = { version = "1.48", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tracing = "0.1"
+tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+usbip = "0.8.0"
+usbd-ccid = "0.4.0"
+usbd-ctaphid = "0.4.0"
