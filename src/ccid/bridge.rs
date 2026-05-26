@@ -7,12 +7,17 @@ use crate::nfc::{CardPresence, NfcReader};
 use super::protocol::{CcidCommand, CcidResponse, CommandStatus, IccStatus, SlotStatus};
 
 const GENERIC_FAILURE_ERROR: u8 = 0xff;
+const T1_PROTOCOL_NUM: u8 = 0x01;
+const DEFAULT_T1_PARAMETERS: [u8; 7] = [0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00];
 
 pub struct CcidBridge {
     reader: Box<dyn NfcReader>,
     #[allow(dead_code)]
     poll_interval: Duration,
     current_card: Option<CardPresence>,
+    slot_powered: bool,
+    protocol_num: u8,
+    parameters: [u8; 7],
 }
 
 impl CcidBridge {
@@ -21,6 +26,9 @@ impl CcidBridge {
             reader,
             poll_interval,
             current_card: None,
+            slot_powered: false,
+            protocol_num: T1_PROTOCOL_NUM,
+            parameters: DEFAULT_T1_PARAMETERS,
         }
     }
 
@@ -36,6 +44,7 @@ impl CcidBridge {
                     Ok(Some(card)) => {
                         let atr = Self::build_pseudo_atr(&card);
                         self.current_card = Some(card);
+                        self.slot_powered = true;
                         CcidResponse::DataBlock {
                             slot,
                             seq,
@@ -47,6 +56,7 @@ impl CcidBridge {
                     }
                     Ok(None) => {
                         self.current_card = None;
+                        self.slot_powered = false;
                         CcidResponse::SlotStatus {
                             slot,
                             seq,
@@ -57,6 +67,7 @@ impl CcidBridge {
                     }
                     Err(error) => {
                         self.current_card = None;
+                        self.slot_powered = false;
                         warn!(?error, "NFC power-on flow failed");
                         CcidResponse::SlotStatus {
                             slot,
@@ -81,11 +92,11 @@ impl CcidBridge {
                     };
                 }
 
-                self.current_card = None;
+                self.slot_powered = false;
                 CcidResponse::SlotStatus {
                     slot,
                     seq,
-                    status: SlotStatus::ok(IccStatus::Inactive),
+                    status: SlotStatus::ok(self.current_icc_status()),
                     error: 0,
                     clock_status: 0,
                 }
@@ -94,16 +105,14 @@ impl CcidBridge {
                 debug!(slot, seq, "handling CCID slot status request");
                 match self.reader.poll_card() {
                     Ok(card) => {
-                        let icc_status = if card.is_some() {
-                            IccStatus::Active
-                        } else {
-                            IccStatus::NotPresent
-                        };
+                        if card.is_none() {
+                            self.slot_powered = false;
+                        }
                         self.current_card = card;
                         CcidResponse::SlotStatus {
                             slot,
                             seq,
-                            status: SlotStatus::ok(icc_status),
+                            status: SlotStatus::ok(self.current_icc_status()),
                             error: 0,
                             clock_status: 0,
                         }
@@ -119,6 +128,37 @@ impl CcidBridge {
                         }
                     }
                 }
+            }
+            CcidCommand::GetParameters { slot, seq } => {
+                debug!(slot, seq, "handling CCID get parameters request");
+                self.parameters_response(slot, seq, false)
+            }
+            CcidCommand::ResetParameters { slot, seq } => {
+                debug!(slot, seq, "handling CCID reset parameters request");
+                self.protocol_num = T1_PROTOCOL_NUM;
+                self.parameters = DEFAULT_T1_PARAMETERS;
+                self.parameters_response(slot, seq, false)
+            }
+            CcidCommand::SetParameters {
+                slot,
+                seq,
+                protocol_num,
+                payload,
+            } => {
+                debug!(
+                    slot,
+                    seq,
+                    protocol_num,
+                    payload_len = payload.len(),
+                    "handling CCID set parameters request"
+                );
+                if protocol_num != T1_PROTOCOL_NUM || payload.len() != DEFAULT_T1_PARAMETERS.len() {
+                    return self.parameters_response(slot, seq, true);
+                }
+
+                self.protocol_num = protocol_num;
+                self.parameters.copy_from_slice(&payload);
+                self.parameters_response(slot, seq, false)
             }
             CcidCommand::XfrBlock {
                 slot,
@@ -136,6 +176,51 @@ impl CcidBridge {
                     "handling CCID APDU exchange"
                 );
 
+                if self.current_card.is_none() {
+                    match self.reader.poll_card() {
+                        Ok(card) => {
+                            self.current_card = card;
+                            if self.current_card.is_none() {
+                                self.slot_powered = false;
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                ?error,
+                                "NFC card presence check failed before APDU exchange"
+                            );
+                            self.slot_powered = false;
+                            return CcidResponse::SlotStatus {
+                                slot,
+                                seq,
+                                status: SlotStatus::failed(IccStatus::Inactive),
+                                error: GENERIC_FAILURE_ERROR,
+                                clock_status: 0,
+                            };
+                        }
+                    }
+                }
+
+                if self.current_card.is_none() {
+                    return CcidResponse::SlotStatus {
+                        slot,
+                        seq,
+                        status: SlotStatus::failed(IccStatus::NotPresent),
+                        error: GENERIC_FAILURE_ERROR,
+                        clock_status: 0,
+                    };
+                }
+
+                if !self.slot_powered {
+                    return CcidResponse::SlotStatus {
+                        slot,
+                        seq,
+                        status: SlotStatus::failed(IccStatus::Inactive),
+                        error: GENERIC_FAILURE_ERROR,
+                        clock_status: 0,
+                    };
+                }
+
                 match self.reader.exchange_apdu(&payload) {
                     Ok(response) => CcidResponse::DataBlock {
                         slot,
@@ -150,13 +235,21 @@ impl CcidBridge {
                         CcidResponse::SlotStatus {
                             slot,
                             seq,
-                            status: SlotStatus::failed(Self::current_icc_status(
-                                &self.current_card,
-                            )),
+                            status: SlotStatus::failed(self.current_icc_status()),
                             error: GENERIC_FAILURE_ERROR,
                             clock_status: 0,
                         }
                     }
+                }
+            }
+            CcidCommand::Abort { slot, seq } => {
+                debug!(slot, seq, "handling CCID abort request");
+                CcidResponse::SlotStatus {
+                    slot,
+                    seq,
+                    status: SlotStatus::ok(self.current_icc_status()),
+                    error: 0,
+                    clock_status: 0,
                 }
             }
             CcidCommand::Unknown {
@@ -170,7 +263,7 @@ impl CcidBridge {
                     slot,
                     seq,
                     status: SlotStatus {
-                        icc: Self::current_icc_status(&self.current_card),
+                        icc: self.current_icc_status(),
                         command: CommandStatus::Failed,
                     },
                     error: GENERIC_FAILURE_ERROR,
@@ -180,23 +273,61 @@ impl CcidBridge {
         }
     }
 
-    fn current_icc_status(card: &Option<CardPresence>) -> IccStatus {
-        if card.is_some() {
+    pub fn card_present(&self) -> bool {
+        self.current_card.is_some()
+    }
+
+    fn current_icc_status(&self) -> IccStatus {
+        if self.current_card.is_none() {
+            IccStatus::NotPresent
+        } else if self.slot_powered {
             IccStatus::Active
         } else {
-            IccStatus::NotPresent
+            IccStatus::Inactive
+        }
+    }
+
+    fn parameters_response(&self, slot: u8, seq: u8, failed: bool) -> CcidResponse {
+        CcidResponse::Parameters {
+            slot,
+            seq,
+            status: if failed {
+                SlotStatus::failed(self.current_icc_status())
+            } else {
+                SlotStatus::ok(self.current_icc_status())
+            },
+            error: if failed { GENERIC_FAILURE_ERROR } else { 0 },
+            protocol_num: self.protocol_num,
+            payload: self.parameters.to_vec(),
         }
     }
 
     fn build_pseudo_atr(card: &CardPresence) -> Vec<u8> {
-        let historical_bytes = if card.historical_bytes.len() > 15 {
-            &card.historical_bytes[..15]
+        let issuer_data = if card.historical_bytes.len() > 13 {
+            &card.historical_bytes[..13]
         } else {
             &card.historical_bytes
         };
 
-        let mut atr = vec![0x3b, 0x80 | historical_bytes.len() as u8];
-        atr.extend_from_slice(historical_bytes);
+        let historical_len = if issuer_data.is_empty() {
+            0
+        } else {
+            2 + issuer_data.len() as u8
+        };
+
+        let mut atr = vec![0x3b, 0x80 | historical_len, 0x01];
+
+        if !issuer_data.is_empty() {
+            atr.push(0x80);
+            atr.push(0x50 | issuer_data.len() as u8);
+            atr.extend_from_slice(issuer_data);
+        }
+
+        let checksum = atr
+            .iter()
+            .skip(1)
+            .fold(0u8, |checksum, byte| checksum ^ byte);
+        atr.push(checksum);
         atr
     }
 }
@@ -265,6 +396,59 @@ mod tests {
             } => {
                 assert_eq!(status, SlotStatus::ok(IccStatus::Active));
                 assert!(!payload.is_empty());
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn power_off_keeps_card_present_but_inactive() {
+        let card = CardPresence {
+            uid: vec![0x01, 0x02, 0x03, 0x04],
+            protocol: CardProtocol::IsoDep,
+            historical_bytes: vec![0x80, 0x31],
+        };
+
+        let reader = FakeReader {
+            poll_results: VecDeque::from([Ok(Some(card.clone())), Ok(Some(card))]),
+            exchange_result: Ok(vec![0x90, 0x00]),
+        };
+        let mut bridge = CcidBridge::new(Box::new(reader), Duration::from_millis(100));
+
+        let _ = bridge.handle_command(CcidCommand::IccPowerOn {
+            slot: 0,
+            seq: 1,
+            power_select: 0,
+        });
+        let response = bridge.handle_command(CcidCommand::IccPowerOff { slot: 0, seq: 2 });
+
+        match response {
+            CcidResponse::SlotStatus { status, .. } => {
+                assert_eq!(status, SlotStatus::ok(IccStatus::Inactive));
+                assert!(bridge.card_present());
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_parameters_returns_t1_defaults() {
+        let reader = FakeReader {
+            poll_results: VecDeque::new(),
+            exchange_result: Ok(vec![0x90, 0x00]),
+        };
+        let mut bridge = CcidBridge::new(Box::new(reader), Duration::from_millis(100));
+
+        let response = bridge.handle_command(CcidCommand::GetParameters { slot: 0, seq: 1 });
+
+        match response {
+            CcidResponse::Parameters {
+                protocol_num,
+                payload,
+                ..
+            } => {
+                assert_eq!(protocol_num, 1);
+                assert_eq!(payload, vec![0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00]);
             }
             other => panic!("unexpected response: {other:?}"),
         }

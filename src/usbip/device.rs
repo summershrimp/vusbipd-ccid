@@ -16,12 +16,17 @@ use crate::ccid::{CcidBridge, protocol::CcidCommand};
 const CCID_INTERFACE_CLASS: u8 = 0x0b;
 const CCID_INTERFACE_SUBCLASS: u8 = 0x00;
 const CCID_INTERFACE_PROTOCOL: u8 = 0x00;
+const CCID_MAX_MESSAGE_LENGTH: usize = 3072;
+const CCID_BULK_IN_ENDPOINT: u8 = 0x81;
+const CCID_BULK_OUT_ENDPOINT: u8 = 0x01;
+const CCID_INTERRUPT_IN_ENDPOINT: u8 = 0x82;
 const CCID_GET_CLOCK_FREQUENCIES: u8 = 0x02;
 const CCID_GET_DATA_RATES: u8 = 0x03;
 const CCID_ABORT: u8 = 0x01;
 const CCID_FUNCTIONAL_DESCRIPTOR_TYPE: u8 = 0x21;
 const CCID_CLOCK_FREQUENCY_KHZ: [u8; 4] = [0xfc, 0x0d, 0x00, 0x00];
 const CCID_DATA_RATE_BPS: [u8; 4] = [0x80, 0x25, 0x00, 0x00];
+const CCID_NOTIFY_SLOT_CHANGE: u8 = 0x50;
 
 pub fn build_virtual_ccid_device(bridge: Arc<Mutex<CcidBridge>>) -> UsbDevice {
     let handler = Arc::new(Mutex::new(
@@ -51,12 +56,21 @@ pub fn build_virtual_ccid_device(bridge: Arc<Mutex<CcidBridge>>) -> UsbDevice {
 struct CcidUsbIpInterfaceHandler {
     bridge: Arc<Mutex<CcidBridge>>,
     pending_in_frames: VecDeque<Vec<u8>>,
+    pending_interrupt_frames: VecDeque<Vec<u8>>,
+    pending_out_buffer: Vec<u8>,
+    slot_present: bool,
 }
 
 impl std::fmt::Debug for CcidUsbIpInterfaceHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CcidUsbIpInterfaceHandler")
             .field("pending_in_frames", &self.pending_in_frames.len())
+            .field(
+                "pending_interrupt_frames",
+                &self.pending_interrupt_frames.len(),
+            )
+            .field("pending_out_buffer", &self.pending_out_buffer.len())
+            .field("slot_present", &self.slot_present)
             .finish()
     }
 }
@@ -66,6 +80,9 @@ impl CcidUsbIpInterfaceHandler {
         Self {
             bridge,
             pending_in_frames: VecDeque::new(),
+            pending_interrupt_frames: VecDeque::new(),
+            pending_out_buffer: Vec::new(),
+            slot_present: false,
         }
     }
 
@@ -169,17 +186,26 @@ impl CcidUsbIpInterfaceHandler {
 
     fn handle_bulk_out(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
         debug!(payload_len = payload.len(), "handling CCID bulk OUT packet");
-        let command = CcidCommand::decode(payload)
-            .map_err(|error| Error::new(ErrorKind::InvalidData, error.to_string()))?;
+        self.pending_out_buffer.extend_from_slice(payload);
 
-        let response = self
-            .bridge
-            .lock()
-            .map_err(|_| Error::other("CCID bridge lock poisoned"))?
-            .handle_command(command)
-            .encode();
+        while let Some(frame) = self.try_take_complete_frame()? {
+            let command = CcidCommand::decode(&frame)
+                .map_err(|error| Error::new(ErrorKind::InvalidData, error.to_string()))?;
 
-        self.pending_in_frames.push_back(response);
+            let (response, card_present) = {
+                let mut bridge = self
+                    .bridge
+                    .lock()
+                    .map_err(|_| Error::other("CCID bridge lock poisoned"))?;
+                let response = bridge.handle_command(command);
+                let card_present = bridge.card_present();
+                (response, card_present)
+            };
+
+            self.pending_in_frames.push_back(response.encode());
+            self.update_slot_presence(card_present);
+        }
+
         Ok(Vec::new())
     }
 
@@ -189,12 +215,61 @@ impl CcidUsbIpInterfaceHandler {
         };
 
         if frame.len() <= max_len {
+            if max_len != 0 && !frame.is_empty() && frame.len() % max_len == 0 {
+                self.pending_in_frames.push_front(Vec::new());
+            }
             return frame;
         }
 
         let remainder = frame.split_off(max_len);
         self.pending_in_frames.push_front(remainder);
         frame
+    }
+
+    fn handle_interrupt_in(&mut self) -> Vec<u8> {
+        self.pending_interrupt_frames
+            .pop_front()
+            .unwrap_or_default()
+    }
+
+    fn update_slot_presence(&mut self, present: bool) {
+        if self.slot_present == present {
+            return;
+        }
+
+        self.slot_present = present;
+        self.pending_interrupt_frames.push_back(vec![
+            CCID_NOTIFY_SLOT_CHANGE,
+            if present { 0b0000_0011 } else { 0b0000_0010 },
+        ]);
+    }
+
+    fn try_take_complete_frame(&mut self) -> Result<Option<Vec<u8>>> {
+        if self.pending_out_buffer.len() < 10 {
+            return Ok(None);
+        }
+
+        let payload_len = u32::from_le_bytes([
+            self.pending_out_buffer[1],
+            self.pending_out_buffer[2],
+            self.pending_out_buffer[3],
+            self.pending_out_buffer[4],
+        ]) as usize;
+        let frame_len = 10 + payload_len;
+
+        if frame_len > CCID_MAX_MESSAGE_LENGTH + 10 {
+            self.pending_out_buffer.clear();
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("CCID frame length {frame_len} exceeds configured maximum"),
+            ));
+        }
+
+        if self.pending_out_buffer.len() < frame_len {
+            return Ok(None);
+        }
+
+        Ok(Some(self.pending_out_buffer.drain(..frame_len).collect()))
     }
 }
 
@@ -216,9 +291,11 @@ impl UsbInterfaceHandler for CcidUsbIpInterfaceHandler {
         }
 
         match (ep.direction(), ep.address) {
-            (Direction::Out, 0x01) => self.handle_bulk_out(req),
-            (Direction::In, 0x81) => Ok(self.handle_bulk_in(transfer_buffer_length as usize)),
-            (Direction::In, 0x82) => Ok(Vec::new()),
+            (Direction::Out, CCID_BULK_OUT_ENDPOINT) => self.handle_bulk_out(req),
+            (Direction::In, CCID_BULK_IN_ENDPOINT) => {
+                Ok(self.handle_bulk_in(transfer_buffer_length as usize))
+            }
+            (Direction::In, CCID_INTERRUPT_IN_ENDPOINT) => Ok(self.handle_interrupt_in()),
             _ => {
                 warn!(
                     address = ep.address,
@@ -245,7 +322,7 @@ mod tests {
     use crate::{
         ccid::{
             CcidBridge,
-            protocol::{CcidCommand, PC_TO_RDR_GET_SLOT_STATUS},
+            protocol::{CcidCommand, PC_TO_RDR_GET_SLOT_STATUS, PC_TO_RDR_ICC_POWER_ON},
         },
         nfc::{CardPresence, CardProtocol, NfcReader, ReaderCapabilities, ReaderError},
     };
@@ -306,5 +383,56 @@ mod tests {
             .handle_bulk_out(&payload)
             .expect("bulk out must succeed");
         assert!(!handler.handle_bulk_in(64).is_empty());
+    }
+
+    #[test]
+    fn fragmented_bulk_out_is_buffered_until_complete() {
+        let bridge = Arc::new(Mutex::new(CcidBridge::new(
+            Box::new(FakeReader {
+                poll_results: VecDeque::from([Ok(Some(CardPresence {
+                    uid: vec![1, 2, 3, 4],
+                    protocol: CardProtocol::IsoDep,
+                    historical_bytes: vec![],
+                }))]),
+            }),
+            Duration::from_millis(100),
+        )));
+
+        let mut handler = CcidUsbIpInterfaceHandler::new(bridge);
+        let payload = vec![PC_TO_RDR_GET_SLOT_STATUS, 0, 0, 0, 0, 0, 1, 0, 0, 0];
+
+        handler
+            .handle_bulk_out(&payload[..4])
+            .expect("first fragment must succeed");
+        assert!(handler.handle_bulk_in(64).is_empty());
+
+        handler
+            .handle_bulk_out(&payload[4..])
+            .expect("second fragment must succeed");
+        assert!(!handler.handle_bulk_in(64).is_empty());
+    }
+
+    #[test]
+    fn slot_change_interrupt_is_generated_when_card_appears() {
+        let bridge = Arc::new(Mutex::new(CcidBridge::new(
+            Box::new(FakeReader {
+                poll_results: VecDeque::from([Ok(Some(CardPresence {
+                    uid: vec![1, 2, 3, 4],
+                    protocol: CardProtocol::IsoDep,
+                    historical_bytes: vec![],
+                }))]),
+            }),
+            Duration::from_millis(100),
+        )));
+
+        let mut handler = CcidUsbIpInterfaceHandler::new(bridge);
+        let payload = vec![PC_TO_RDR_ICC_POWER_ON, 0, 0, 0, 0, 0, 1, 0, 0, 0];
+        let _decoded = CcidCommand::decode(&payload).expect("payload must decode");
+
+        handler
+            .handle_bulk_out(&payload)
+            .expect("bulk out must succeed");
+
+        assert_eq!(handler.handle_interrupt_in(), vec![0x50, 0x03]);
     }
 }

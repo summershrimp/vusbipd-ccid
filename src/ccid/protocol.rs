@@ -3,10 +3,15 @@ use thiserror::Error;
 pub const PC_TO_RDR_ICC_POWER_ON: u8 = 0x62;
 pub const PC_TO_RDR_ICC_POWER_OFF: u8 = 0x63;
 pub const PC_TO_RDR_GET_SLOT_STATUS: u8 = 0x65;
+pub const PC_TO_RDR_SET_PARAMETERS: u8 = 0x61;
+pub const PC_TO_RDR_GET_PARAMETERS: u8 = 0x6c;
+pub const PC_TO_RDR_RESET_PARAMETERS: u8 = 0x6d;
 pub const PC_TO_RDR_XFR_BLOCK: u8 = 0x6f;
+pub const PC_TO_RDR_ABORT: u8 = 0x72;
 
 pub const RDR_TO_PC_DATA_BLOCK: u8 = 0x80;
 pub const RDR_TO_PC_SLOT_STATUS: u8 = 0x81;
+pub const RDR_TO_PC_PARAMETERS: u8 = 0x82;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CcidCommand {
@@ -23,12 +28,30 @@ pub enum CcidCommand {
         slot: u8,
         seq: u8,
     },
+    GetParameters {
+        slot: u8,
+        seq: u8,
+    },
+    ResetParameters {
+        slot: u8,
+        seq: u8,
+    },
+    SetParameters {
+        slot: u8,
+        seq: u8,
+        protocol_num: u8,
+        payload: Vec<u8>,
+    },
     XfrBlock {
         slot: u8,
         seq: u8,
         bwi: u8,
         level_parameter: u16,
         payload: Vec<u8>,
+    },
+    Abort {
+        slot: u8,
+        seq: u8,
     },
     Unknown {
         message_type: u8,
@@ -55,6 +78,14 @@ pub enum CcidResponse {
         status: SlotStatus,
         error: u8,
         clock_status: u8,
+    },
+    Parameters {
+        slot: u8,
+        seq: u8,
+        status: SlotStatus,
+        error: u8,
+        protocol_num: u8,
+        payload: Vec<u8>,
     },
 }
 
@@ -136,6 +167,14 @@ impl CcidCommand {
             },
             PC_TO_RDR_ICC_POWER_OFF => Self::IccPowerOff { slot, seq },
             PC_TO_RDR_GET_SLOT_STATUS => Self::GetSlotStatus { slot, seq },
+            PC_TO_RDR_GET_PARAMETERS => Self::GetParameters { slot, seq },
+            PC_TO_RDR_RESET_PARAMETERS => Self::ResetParameters { slot, seq },
+            PC_TO_RDR_SET_PARAMETERS => Self::SetParameters {
+                slot,
+                seq,
+                protocol_num: parameters[0],
+                payload,
+            },
             PC_TO_RDR_XFR_BLOCK => Self::XfrBlock {
                 slot,
                 seq,
@@ -143,6 +182,7 @@ impl CcidCommand {
                 level_parameter: u16::from_le_bytes([parameters[1], parameters[2]]),
                 payload,
             },
+            PC_TO_RDR_ABORT => Self::Abort { slot, seq },
             _ => Self::Unknown {
                 message_type,
                 slot,
@@ -188,6 +228,24 @@ impl CcidResponse {
                 *seq,
                 [status.encode(), *error, *clock_status],
             ),
+            Self::Parameters {
+                slot,
+                seq,
+                status,
+                error,
+                protocol_num,
+                payload,
+            } => {
+                let mut frame = header(
+                    RDR_TO_PC_PARAMETERS,
+                    payload.len(),
+                    *slot,
+                    *seq,
+                    [status.encode(), *error, *protocol_num],
+                );
+                frame.extend_from_slice(payload);
+                frame
+            }
         }
     }
 }
@@ -205,8 +263,9 @@ fn header(message_type: u8, payload_length: usize, slot: u8, seq: u8, params: [u
 #[cfg(test)]
 mod tests {
     use super::{
-        CcidCommand, CcidResponse, CommandStatus, IccStatus, PC_TO_RDR_XFR_BLOCK,
-        RDR_TO_PC_DATA_BLOCK, SlotStatus,
+        CcidCommand, CcidResponse, CommandStatus, IccStatus, PC_TO_RDR_GET_PARAMETERS,
+        PC_TO_RDR_SET_PARAMETERS, PC_TO_RDR_XFR_BLOCK, RDR_TO_PC_DATA_BLOCK, RDR_TO_PC_PARAMETERS,
+        SlotStatus,
     };
 
     #[test]
@@ -259,5 +318,65 @@ mod tests {
         assert_eq!(frame[0], RDR_TO_PC_DATA_BLOCK);
         assert_eq!(&frame[1..5], &[0x02, 0x00, 0x00, 0x00]);
         assert_eq!(&frame[10..], &[0x90, 0x00]);
+    }
+
+    #[test]
+    fn decode_get_parameters_command() {
+        let frame = [PC_TO_RDR_GET_PARAMETERS, 0, 0, 0, 0, 0, 9, 0, 0, 0];
+
+        let decoded = CcidCommand::decode(&frame).expect("decode should succeed");
+        assert_eq!(decoded, CcidCommand::GetParameters { slot: 0, seq: 9 });
+    }
+
+    #[test]
+    fn decode_set_parameters_command() {
+        let frame = [
+            PC_TO_RDR_SET_PARAMETERS,
+            0x07,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x44,
+            0x01,
+            0x00,
+            0x00,
+            0x11,
+            0x10,
+            0x00,
+            0x15,
+            0x00,
+            0xfe,
+            0x00,
+        ];
+
+        let decoded = CcidCommand::decode(&frame).expect("decode should succeed");
+        assert_eq!(
+            decoded,
+            CcidCommand::SetParameters {
+                slot: 0,
+                seq: 0x44,
+                protocol_num: 0x01,
+                payload: vec![0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00],
+            }
+        );
+    }
+
+    #[test]
+    fn encode_parameters_response() {
+        let frame = CcidResponse::Parameters {
+            slot: 0,
+            seq: 1,
+            status: SlotStatus::ok(IccStatus::Inactive),
+            error: 0,
+            protocol_num: 1,
+            payload: vec![0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00],
+        }
+        .encode();
+
+        assert_eq!(frame[0], RDR_TO_PC_PARAMETERS);
+        assert_eq!(&frame[1..5], &[0x07, 0x00, 0x00, 0x00]);
+        assert_eq!(frame[9], 0x01);
+        assert_eq!(&frame[10..], &[0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00]);
     }
 }
