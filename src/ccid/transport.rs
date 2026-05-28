@@ -491,7 +491,8 @@ mod tests {
     fn interrupt_in_returns_empty_when_queue_is_empty() {
         let mut transport = new_transport(VecDeque::from([Ok(None)]));
 
-        assert!(transport.handle_interrupt_in().is_empty());
+        assert_eq!(transport.handle_interrupt_in(), vec![0x50, 0x00]);
+        assert_eq!(transport.handle_interrupt_in(), vec![0x50, 0x00]);
     }
 
     #[test]

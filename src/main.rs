@@ -1,5 +1,4 @@
 use clap::Parser;
-use tracing_log::LogTracer;
 use vusbipd_ccid::{
     app::Application,
     config::{AppConfig, Cli},

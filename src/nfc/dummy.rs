@@ -2,29 +2,24 @@ use super::{
     CardPresence, CardProtocol, NfcReader, ReaderCapabilities, ReaderError, ReaderFactory,
 };
 
+const CTAP2_ERR_INVALID_COMMAND: u8 = 0x01;
+const FIDO_AID: &[u8] = &[0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
+const FIDO_NFCCTAP_MSG: u8 = 0x10;
+const FIDO_NFCCTAP_GET_RESPONSE: u8 = 0x11;
+const FIDO_NFCCTAP_CONTROL: u8 = 0x12;
+const FIDO_NFC_END_CTAP_MSG: u8 = 0x01;
+const FIDO_VERSION_U2F_V2: &[u8] = b"U2F_V2";
+const FIDO_VERSION_2_0: &[u8] = b"FIDO_2_0";
+const FIDO_TRANSPORT_NFC: &[u8] = b"nfc";
+const FIDO_DUMMY_AAGUID: [u8; 16] = [
+    0x76, 0x75, 0x73, 0x62, 0x69, 0x70, 0x64, 0x2d, 0x63, 0x63, 0x69, 0x64, 0x2d, 0x66, 0x69,
+    0x64,
+];
 const SW_SUCCESS: [u8; 2] = [0x90, 0x00];
-const SW_FILE_NOT_FOUND: [u8; 2] = [0x6a, 0x82];
 const SW_INS_NOT_SUPPORTED: [u8; 2] = [0x6d, 0x00];
+const SW_WRONG_PARAMETERS: [u8; 2] = [0x6a, 0x86];
 const SW_WRONG_LENGTH: [u8; 2] = [0x67, 0x00];
-const PIV_AID: &[u8] = &[0xa0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00];
-const PIV_AID_PREFIX: &[u8] = &[0xa0, 0x00, 0x00, 0x03, 0x08];
-const PIV_OBJECT_DISCOVERY: &[u8] = &[
-    0x7e, 0x12, 0x4f, 0x0b, 0xa0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01,
-    0x00, 0x5f, 0x2f, 0x02, 0x01, 0x00,
-];
-const PIV_OBJECT_CHUID: &[u8] = &[
-    0x30, 0x19, 0xd4, 0xe7, 0x39, 0xda, 0x73, 0x9c, 0xed, 0x39, 0xce, 0x73, 0x9d, 0x83,
-    0x68, 0x58, 0x21, 0x08, 0x42, 0x10, 0x84, 0x21, 0xc8, 0x42, 0x10, 0xc3, 0xeb, 0x34,
-    0x08, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a,
-    0xbc, 0xde, 0xf0, 0x35, 0x08, 0x32, 0x30, 0x33, 0x30, 0x30, 0x31, 0x30, 0x31, 0x3e,
-    0x00, 0xfe, 0x00,
-];
-const PIV_OBJECT_CCC: &[u8] = &[
-    0xf0, 0x15, 0xa0, 0x00, 0x00, 0x01, 0x16, 0xff, 0x02, 0x10, 0x32, 0x54, 0x76, 0x98,
-    0xba, 0xdc, 0xfe, 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xf1, 0x01, 0x21, 0xf2, 0x01,
-    0x21, 0xf3, 0x00, 0xf4, 0x01, 0x00, 0xf5, 0x01, 0x10, 0xf6, 0x00, 0xf7, 0x00, 0xfa,
-    0x00, 0xfb, 0x00, 0xfc, 0x00, 0xfd, 0x00, 0xfe, 0x00,
-];
+const SW_FILE_NOT_FOUND: [u8; 2] = [0x6a, 0x82];
 
 pub struct DummyReaderFactory;
 
@@ -34,12 +29,22 @@ impl ReaderFactory for DummyReaderFactory {
     }
 
     fn open(&self) -> Result<Box<dyn NfcReader>, ReaderError> {
-        Ok(Box::new(DummyReader { card_present: true }))
+        Ok(Box::new(DummyReader {
+            card_present: true,
+            selected_applet: SelectedApplet::None,
+        }))
     }
 }
 
 struct DummyReader {
     card_present: bool,
+    selected_applet: SelectedApplet,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectedApplet {
+    None,
+    Fido,
 }
 
 impl NfcReader for DummyReader {
@@ -56,7 +61,7 @@ impl NfcReader for DummyReader {
             Ok(Some(CardPresence {
                 uid: vec![0x01, 0x02, 0x03, 0x04],
                 protocol: CardProtocol::IsoDep,
-                historical_bytes: vec![0x4f, 0x0b, 0xa0, 0x00, 0x00, 0x03, 0x08, 0x00],
+                historical_bytes: FIDO_VERSION_2_0.to_vec(),
             }))
         } else {
             Ok(None)
@@ -64,17 +69,17 @@ impl NfcReader for DummyReader {
     }
 
     fn power_off(&mut self) -> Result<(), ReaderError> {
-        // self.card_present = false;
+        self.selected_applet = SelectedApplet::None;
         Ok(())
     }
 
-    fn exchange_apdu(&mut self, _apdu: &[u8]) -> Result<Vec<u8>, ReaderError> {
-        self.handle_apdu(_apdu)
+    fn exchange_apdu(&mut self, apdu: &[u8]) -> Result<Vec<u8>, ReaderError> {
+        self.handle_apdu(apdu)
     }
 }
 
 impl DummyReader {
-    fn handle_apdu(&self, apdu: &[u8]) -> Result<Vec<u8>, ReaderError> {
+    fn handle_apdu(&mut self, apdu: &[u8]) -> Result<Vec<u8>, ReaderError> {
         if !self.card_present {
             return Err(ReaderError::Protocol(
                 "no card present in dummy reader".to_string(),
@@ -86,16 +91,46 @@ impl DummyReader {
         };
 
         let response = match (cla, ins, p1, p2) {
-            (_, 0xa4, 0x04, 0x00) | (_, 0xa4, 0x04, 0x0c) if Self::is_piv_select(data) => {
-                Self::select_piv_response()
+            (0x00, 0xa4, 0x04, 0x00) | (0x00, 0xa4, 0x04, 0x0c) if data == FIDO_AID => {
+                self.selected_applet = SelectedApplet::Fido;
+                Self::append_status(FIDO_VERSION_U2F_V2.to_vec(), SW_SUCCESS)
             }
-            (_, 0xa4, 0x00, 0x00) | (_, 0xa4, 0x00, 0x0c) => SW_SUCCESS.to_vec(),
-            (_, 0xcb, 0x3f, 0xff) => Self::get_data_response(data),
-            (_, 0x20, 0x00, 0x80) => SW_SUCCESS.to_vec(),
+            (0x80, FIDO_NFCCTAP_MSG, _, 0x00) if self.selected_applet == SelectedApplet::Fido => {
+                self.handle_ctap_msg(p1, data)
+            }
+            (0x80, FIDO_NFCCTAP_GET_RESPONSE, 0x00, 0x00)
+                if self.selected_applet == SelectedApplet::Fido =>
+            {
+                SW_INS_NOT_SUPPORTED.to_vec()
+            }
+            (0x80, FIDO_NFCCTAP_CONTROL, FIDO_NFC_END_CTAP_MSG, 0x00)
+                if self.selected_applet == SelectedApplet::Fido =>
+            {
+                self.selected_applet = SelectedApplet::None;
+                SW_SUCCESS.to_vec()
+            }
+            (0x00, 0xa4, 0x04, 0x00) | (0x00, 0xa4, 0x04, 0x0c) => SW_FILE_NOT_FOUND.to_vec(),
             _ => SW_INS_NOT_SUPPORTED.to_vec(),
         };
 
         Ok(response)
+    }
+
+    fn handle_ctap_msg(&mut self, p1: u8, data: &[u8]) -> Vec<u8> {
+        if p1 & 0x7f != 0 {
+            return SW_WRONG_PARAMETERS.to_vec();
+        }
+
+        let Some((&command, payload)) = data.split_first() else {
+            return SW_WRONG_LENGTH.to_vec();
+        };
+
+        let response = match command {
+            0x04 if payload.is_empty() => Self::ctap_success(Self::authenticator_get_info()),
+            _ => Self::ctap_error(CTAP2_ERR_INVALID_COMMAND),
+        };
+
+        Self::append_status(response, SW_SUCCESS)
     }
 
     fn parse_short_apdu(apdu: &[u8]) -> Option<(u8, u8, u8, u8, &[u8])> {
@@ -125,83 +160,110 @@ impl DummyReader {
         Some((cla, ins, p1, p2, &body[1..1 + lc]))
     }
 
-    fn is_piv_select(data: &[u8]) -> bool {
-        data == PIV_AID || data == PIV_AID_PREFIX
-    }
+    fn authenticator_get_info() -> Vec<u8> {
+        let mut response = vec![0xa6];
 
-    fn select_piv_response() -> Vec<u8> {
-        let mut response = vec![0x61, 0x11, 0x4f, 0x0b];
-        response.extend_from_slice(PIV_AID);
-        response.extend_from_slice(&[0x79, 0x02, 0x4f, 0x00]);
-        response.extend_from_slice(&SW_SUCCESS);
+        response.push(0x01);
+        response.push(0x82);
+        response.extend(Self::encode_text(FIDO_VERSION_U2F_V2));
+        response.extend(Self::encode_text(FIDO_VERSION_2_0));
+
+        response.push(0x03);
+        response.push(0x50);
+        response.extend_from_slice(&FIDO_DUMMY_AAGUID);
+
+        response.push(0x04);
+        response.push(0xa4);
+        response.extend(Self::encode_text(b"rk"));
+        response.push(0xf4);
+        response.extend(Self::encode_text(b"up"));
+        response.push(0xf5);
+        response.extend(Self::encode_text(b"plat"));
+        response.push(0xf4);
+        response.extend(Self::encode_text(b"clientPin"));
+        response.push(0xf4);
+
+        response.push(0x05);
+        response.extend_from_slice(&[0x19, 0x04, 0x00]);
+
+        response.push(0x06);
+        response.extend_from_slice(&[0x81, 0x01]);
+
+        response.push(0x09);
+        response.push(0x81);
+        response.extend(Self::encode_text(FIDO_TRANSPORT_NFC));
+
         response
     }
 
-    fn get_data_response(request: &[u8]) -> Vec<u8> {
-        let Some(object_id) = Self::parse_object_id(request) else {
-            return SW_FILE_NOT_FOUND.to_vec();
-        };
-
-        match object_id {
-            [0x7e] => {
-                let mut response = PIV_OBJECT_DISCOVERY.to_vec();
-                response.extend_from_slice(&SW_SUCCESS);
-                response
-            }
-            [0x5f, 0xc1, 0x02] => Self::wrap_piv_object(PIV_OBJECT_CHUID),
-            [0x5f, 0xc1, 0x07] => Self::wrap_piv_object(PIV_OBJECT_CCC),
-            _ => SW_FILE_NOT_FOUND.to_vec(),
-        }
+    fn ctap_success(payload: Vec<u8>) -> Vec<u8> {
+        let mut response = Vec::with_capacity(payload.len() + 1);
+        response.push(0x00);
+        response.extend_from_slice(&payload);
+        response
     }
 
-    fn parse_object_id(request: &[u8]) -> Option<&[u8]> {
-        if request.len() < 2 || request[0] != 0x5c {
-            return None;
-        }
-
-        let len = request[1] as usize;
-        if request.len() < 2 + len {
-            return None;
-        }
-
-        Some(&request[2..2 + len])
+    fn ctap_error(code: u8) -> Vec<u8> {
+        vec![code]
     }
 
-    fn wrap_piv_object(object: &[u8]) -> Vec<u8> {
-        let mut response = vec![0x53, object.len() as u8];
-        response.extend_from_slice(object);
-        response.extend_from_slice(&SW_SUCCESS);
+    fn encode_text(value: &[u8]) -> Vec<u8> {
+        assert!(value.len() < 24, "dummy CBOR helper only supports short text");
+
+        let mut encoded = Vec::with_capacity(value.len() + 1);
+        encoded.push(0x60 | value.len() as u8);
+        encoded.extend_from_slice(value);
+        encoded
+    }
+
+    fn append_status(mut response: Vec<u8>, status: [u8; 2]) -> Vec<u8> {
+        response.extend_from_slice(&status);
         response
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DummyReader;
+    use super::{DummyReader, FIDO_VERSION_2_0, SelectedApplet};
 
     #[test]
-    fn select_piv_aid_returns_success() {
-        let reader = DummyReader { card_present: true };
+    fn select_fido_aid_returns_u2f_v2() {
+        let mut reader = DummyReader {
+            card_present: true,
+            selected_applet: SelectedApplet::None,
+        };
 
         let response = reader
             .handle_apdu(&[
-                0x00, 0xa4, 0x04, 0x00, 0x0b, 0xa0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00,
-                0x10, 0x00, 0x01, 0x00,
+                0x00, 0xa4, 0x04, 0x00, 0x08, 0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00,
+                0x01,
             ])
             .expect("SELECT must succeed");
 
+        assert_eq!(&response[..6], b"U2F_V2");
         assert!(response.ends_with(&[0x90, 0x00]));
     }
 
     #[test]
-    fn get_data_for_chuid_returns_wrapped_object() {
-        let reader = DummyReader { card_present: true };
+    fn authenticator_get_info_returns_success_status() {
+        let mut reader = DummyReader {
+            card_present: true,
+            selected_applet: SelectedApplet::None,
+        };
+
+        let _ = reader
+            .handle_apdu(&[
+                0x00, 0xa4, 0x04, 0x00, 0x08, 0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00,
+                0x01,
+            ])
+            .expect("SELECT must succeed");
 
         let response = reader
-            .handle_apdu(&[0x00, 0xcb, 0x3f, 0xff, 0x05, 0x5c, 0x03, 0x5f, 0xc1, 0x02])
-            .expect("GET DATA must succeed");
+            .handle_apdu(&[0x80, 0x10, 0x80, 0x00, 0x01, 0x04])
+            .expect("authenticatorGetInfo must succeed");
 
-        assert_eq!(response[0], 0x53);
+        assert_eq!(response[0], 0x00);
+        assert!(response.windows(FIDO_VERSION_2_0.len()).any(|window| window == FIDO_VERSION_2_0));
         assert!(response.ends_with(&[0x90, 0x00]));
     }
 }
