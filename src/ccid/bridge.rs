@@ -7,6 +7,8 @@ use super::protocol::{CcidCommand, CcidResponse, CommandStatus, IccStatus, SlotS
 const GENERIC_FAILURE_ERROR: u8 = 0xff;
 const T1_PROTOCOL_NUM: u8 = 0x01;
 const DEFAULT_T1_PARAMETERS: [u8; 7] = [0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00];
+const APDU_SELECT_INS: u8 = 0xa4;
+const APDU_SELECT_BY_DF_NAME_P1: u8 = 0x04;
 
 pub struct CcidBridge {
     reader: Box<dyn NfcReader>,
@@ -214,6 +216,10 @@ impl CcidBridge {
                     };
                 }
 
+                if let Some(aid) = Self::select_aid(&payload) {
+                    debug!(aid = %format_hex(aid), "trying card AID");
+                }
+
                 match self.reader.exchange_apdu(&payload) {
                     Ok(response) => CcidResponse::DataBlock {
                         slot,
@@ -329,6 +335,29 @@ impl CcidBridge {
         atr.push(checksum);
         atr
     }
+
+    fn select_aid(apdu: &[u8]) -> Option<&[u8]> {
+        if apdu.len() < 5 || apdu[1] != APDU_SELECT_INS || apdu[2] != APDU_SELECT_BY_DF_NAME_P1 {
+            return None;
+        }
+
+        let aid_len = apdu[4] as usize;
+        let aid_start = 5;
+        let aid_end = aid_start + aid_len;
+
+        (aid_len > 0 && apdu.len() >= aid_end).then_some(&apdu[aid_start..aid_end])
+    }
+}
+
+fn format_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 #[cfg(test)]
@@ -340,7 +369,7 @@ mod tests {
         nfc::{CardPresence, CardProtocol, NfcReader, ReaderCapabilities, ReaderError},
     };
 
-    use super::CcidBridge;
+    use super::{format_hex, CcidBridge};
 
     struct FakeReader {
         poll_results: VecDeque<Result<Option<CardPresence>, ReaderError>>,
@@ -451,5 +480,17 @@ mod tests {
             }
             other => panic!("unexpected response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn select_aid_extracts_df_name() {
+        let apdu = [0x00, 0xa4, 0x04, 0x00, 0x03, 0xa0, 0x00, 0x01, 0x00];
+
+        assert_eq!(CcidBridge::select_aid(&apdu), Some([0xa0, 0x00, 0x01].as_slice()));
+    }
+
+    #[test]
+    fn format_hex_returns_lowercase_hex() {
+        assert_eq!(format_hex(&[0xa0, 0x00, 0x01]), "a00001");
     }
 }
