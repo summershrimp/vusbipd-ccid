@@ -15,6 +15,6 @@ tokio = { version = "1.48", features = ["io-util", "macros", "net", "rt-multi-th
 tracing = "0.1"
 tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-usbip = "0.8.0"
+usbip = { git = "https://github.com/jiegec/usbip.git", rev = "dbc8ffdb9c08211b175e0192b0f3ae3f5257b833" }
 usbd-ccid = "0.4.0"
 usbd-ctaphid = "0.4.0"

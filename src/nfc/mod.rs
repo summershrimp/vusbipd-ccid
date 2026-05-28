@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+pub mod dummy;
 pub mod pn532;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -31,6 +31,7 @@ pub struct Cli {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum ReaderBackend {
     Pn532Uart,
+    Dummy,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +44,7 @@ pub struct AppConfig {
 #[derive(Debug, Clone)]
 pub enum ReaderConfig {
     Pn532Uart(Pn532UartConfig),
+    Dummy,
 }
 
 impl TryFrom<Cli> for AppConfig {
@@ -60,6 +62,7 @@ impl TryFrom<Cli> for AppConfig {
                     baud_rate: cli.serial_baud_rate,
                 })
             }
+            ReaderBackend::Dummy => ReaderConfig::Dummy,
         };
 
         Ok(Self {

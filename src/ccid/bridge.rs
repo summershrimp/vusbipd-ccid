@@ -12,6 +12,7 @@ const DEFAULT_T1_PARAMETERS: [u8; 7] = [0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00
 
 pub struct CcidBridge {
     reader: Box<dyn NfcReader>,
+    reader_capabilities: crate::nfc::ReaderCapabilities,
     #[allow(dead_code)]
     poll_interval: Duration,
     current_card: Option<CardPresence>,
@@ -22,8 +23,10 @@ pub struct CcidBridge {
 
 impl CcidBridge {
     pub fn new(reader: Box<dyn NfcReader>, poll_interval: Duration) -> Self {
+        let reader_capabilities = reader.capabilities();
         Self {
             reader,
+            reader_capabilities,
             poll_interval,
             current_card: None,
             slot_powered: false,
@@ -103,12 +106,12 @@ impl CcidBridge {
             }
             CcidCommand::GetSlotStatus { slot, seq } => {
                 debug!(slot, seq, "handling CCID slot status request");
-                match self.reader.poll_card() {
-                    Ok(card) => {
-                        if card.is_none() {
-                            self.slot_powered = false;
+                match self.refresh_card_presence() {
+                    Ok(_) => {
+                        if self.current_card.is_some() && self.reader_capabilities.name == "dummy" {
+                            self.slot_powered = true;
                         }
-                        self.current_card = card;
+
                         CcidResponse::SlotStatus {
                             slot,
                             seq,
@@ -177,13 +180,8 @@ impl CcidBridge {
                 );
 
                 if self.current_card.is_none() {
-                    match self.reader.poll_card() {
-                        Ok(card) => {
-                            self.current_card = card;
-                            if self.current_card.is_none() {
-                                self.slot_powered = false;
-                            }
-                        }
+                    match self.refresh_card_presence() {
+                        Ok(_) => {}
                         Err(error) => {
                             warn!(
                                 ?error,
@@ -277,7 +275,16 @@ impl CcidBridge {
         self.current_card.is_some()
     }
 
-    fn current_icc_status(&self) -> IccStatus {
+    pub fn refresh_card_presence(&mut self) -> Result<bool, crate::nfc::ReaderError> {
+        let card = self.reader.poll_card()?;
+        if card.is_none() {
+            self.slot_powered = false;
+        }
+        self.current_card = card;
+        Ok(self.current_card.is_some())
+    }
+
+    pub(crate) fn current_icc_status(&self) -> IccStatus {
         if self.current_card.is_none() {
             IccStatus::NotPresent
         } else if self.slot_powered {

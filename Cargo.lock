@@ -1115,8 +1115,7 @@ dependencies = [
 [[package]]
 name = "usbip"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5caa6b22130a96b82d4e9c51cf86c7bbe9bee10348acbd797d68b30829b88a3d"
+source = "git+https://github.com/jiegec/usbip.git?rev=dbc8ffdb9c08211b175e0192b0f3ae3f5257b833#dbc8ffdb9c08211b175e0192b0f3ae3f5257b833"
 dependencies = [
  "log",
  "num-derive",

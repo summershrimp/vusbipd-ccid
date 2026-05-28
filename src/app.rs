@@ -6,7 +6,7 @@ use tracing::info;
 use crate::{
     ccid::CcidBridge,
     config::{AppConfig, ReaderConfig},
-    nfc::{ReaderFactory, pn532::Pn532UartFactory},
+    nfc::{ReaderFactory, dummy::DummyReaderFactory, pn532::Pn532UartFactory},
     stack::DependencyStack,
     usbip::UsbIpServer,
 };
@@ -38,6 +38,14 @@ impl Application {
                 info!(
                     backend = factory.backend_name(),
                     "opening NFC reader backend"
+                );
+                factory.open()?
+            }
+            ReaderConfig::Dummy => {
+                let factory = DummyReaderFactory;
+                info!(
+                    backend = factory.backend_name(),
+                    "opening dummy NFC reader backend"
                 );
                 factory.open()?
             }
