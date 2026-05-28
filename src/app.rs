@@ -20,7 +20,6 @@ impl Application {
     }
 
     pub async fn run(self) -> Result<()> {
-
         let reader = match self.config.reader.clone() {
             ReaderConfig::Pn532Uart(config) => {
                 let factory = Pn532UartFactory::new(config);
@@ -40,10 +39,7 @@ impl Application {
             }
         };
 
-        let bridge = Arc::new(Mutex::new(CcidBridge::new(
-            reader,
-            self.config.poll_interval,
-        )));
+        let bridge = Arc::new(Mutex::new(CcidBridge::new(reader)));
         let server = UsbIpServer::new(self.config.listen_addr, bridge);
         info!(listen_addr = %self.config.listen_addr, "starting USB/IP virtual CCID server");
         server.run().await

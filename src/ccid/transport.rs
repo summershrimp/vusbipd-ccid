@@ -375,10 +375,7 @@ impl CcidCommand {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::VecDeque,
-        time::Duration,
-    };
+    use std::collections::VecDeque;
 
     use crate::{
         ccid::{
@@ -421,10 +418,9 @@ mod tests {
     fn new_transport(
         poll_results: VecDeque<Result<Option<CardPresence>, ReaderError>>,
     ) -> CcidTransport {
-        let bridge = Arc::new(Mutex::new(CcidBridge::new(
-            Box::new(FakeReader { poll_results }),
-            Duration::from_millis(100),
-        )));
+        let bridge = Arc::new(Mutex::new(CcidBridge::new(Box::new(FakeReader {
+            poll_results,
+        }))));
         CcidTransport::new(bridge)
     }
 

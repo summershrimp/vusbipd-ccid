@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Parser, ValueEnum};
@@ -12,7 +12,7 @@ use crate::nfc::pn532::Pn532UartConfig;
     about = "USB/IP virtual CCID exporter backed by NFC readers"
 )]
 pub struct Cli {
-    #[arg(long, default_value = "0.0.0.0:3240")]
+    #[arg(long, default_value = "127.0.0.1:13240")]
     pub listen_addr: SocketAddr,
 
     #[arg(long, value_enum, default_value_t = ReaderBackend::Pn532Uart)]
@@ -23,9 +23,6 @@ pub struct Cli {
 
     #[arg(long, default_value_t = 115_200)]
     pub serial_baud_rate: u32,
-
-    #[arg(long, default_value_t = 500)]
-    pub poll_interval_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
@@ -38,7 +35,6 @@ pub enum ReaderBackend {
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
     pub reader: ReaderConfig,
-    pub poll_interval: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +64,6 @@ impl TryFrom<Cli> for AppConfig {
         Ok(Self {
             listen_addr: cli.listen_addr,
             reader,
-            poll_interval: Duration::from_millis(cli.poll_interval_ms),
         })
     }
 }

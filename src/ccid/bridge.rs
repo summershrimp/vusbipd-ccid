@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use tracing::{debug, warn};
 
 use crate::nfc::{CardPresence, NfcReader};
@@ -13,8 +11,6 @@ const DEFAULT_T1_PARAMETERS: [u8; 7] = [0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00
 pub struct CcidBridge {
     reader: Box<dyn NfcReader>,
     reader_capabilities: crate::nfc::ReaderCapabilities,
-    #[allow(dead_code)]
-    poll_interval: Duration,
     current_card: Option<CardPresence>,
     slot_powered: bool,
     protocol_num: u8,
@@ -22,12 +18,11 @@ pub struct CcidBridge {
 }
 
 impl CcidBridge {
-    pub fn new(reader: Box<dyn NfcReader>, poll_interval: Duration) -> Self {
+    pub fn new(reader: Box<dyn NfcReader>) -> Self {
         let reader_capabilities = reader.capabilities();
         Self {
             reader,
             reader_capabilities,
-            poll_interval,
             current_card: None,
             slot_powered: false,
             protocol_num: T1_PROTOCOL_NUM,
@@ -338,7 +333,7 @@ impl CcidBridge {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, time::Duration};
+    use std::collections::VecDeque;
 
     use crate::{
         ccid::protocol::{CcidCommand, CcidResponse, IccStatus, SlotStatus},
@@ -386,7 +381,7 @@ mod tests {
             poll_results: VecDeque::from([Ok(Some(card))]),
             exchange_result: Ok(vec![0x90, 0x00]),
         };
-        let mut bridge = CcidBridge::new(Box::new(reader), Duration::from_millis(100));
+        let mut bridge = CcidBridge::new(Box::new(reader));
 
         let response = bridge.handle_command(CcidCommand::IccPowerOn {
             slot: 0,
@@ -417,7 +412,7 @@ mod tests {
             poll_results: VecDeque::from([Ok(Some(card.clone())), Ok(Some(card))]),
             exchange_result: Ok(vec![0x90, 0x00]),
         };
-        let mut bridge = CcidBridge::new(Box::new(reader), Duration::from_millis(100));
+        let mut bridge = CcidBridge::new(Box::new(reader));
 
         let _ = bridge.handle_command(CcidCommand::IccPowerOn {
             slot: 0,
@@ -441,7 +436,7 @@ mod tests {
             poll_results: VecDeque::new(),
             exchange_result: Ok(vec![0x90, 0x00]),
         };
-        let mut bridge = CcidBridge::new(Box::new(reader), Duration::from_millis(100));
+        let mut bridge = CcidBridge::new(Box::new(reader));
 
         let response = bridge.handle_command(CcidCommand::GetParameters { slot: 0, seq: 1 });
 
