@@ -11,6 +11,7 @@ const FIDO_NFC_END_CTAP_MSG: u8 = 0x01;
 const FIDO_VERSION_U2F_V2: &[u8] = b"U2F_V2";
 const FIDO_VERSION_2_0: &[u8] = b"FIDO_2_0";
 const FIDO_TRANSPORT_NFC: &[u8] = b"nfc";
+const DUMMY_ATR: [u8; 12] = [0x3b, 0x68, 0x00, 0xff, 0x38, 0x2b, 0x41, 0x52, 0x44, 0x6e, 0x73, 0x73];
 const FIDO_DUMMY_AAGUID: [u8; 16] = [
     0x76, 0x75, 0x73, 0x62, 0x69, 0x70, 0x64, 0x2d, 0x63, 0x63, 0x69, 0x64, 0x2d, 0x66, 0x69,
     0x64,
@@ -61,7 +62,7 @@ impl NfcReader for DummyReader {
             Ok(Some(CardPresence {
                 uid: vec![0x01, 0x02, 0x03, 0x04],
                 protocol: CardProtocol::IsoDep,
-                historical_bytes: FIDO_VERSION_2_0.to_vec(),
+                historical_bytes: DUMMY_ATR.to_vec(),
             }))
         } else {
             Ok(None)

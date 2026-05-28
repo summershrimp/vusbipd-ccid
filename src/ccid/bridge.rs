@@ -310,6 +310,14 @@ impl CcidBridge {
     }
 
     fn build_pseudo_atr(card: &CardPresence) -> Vec<u8> {
+        if card
+            .historical_bytes
+            .first()
+            .is_some_and(|byte| matches!(byte, 0x3b | 0x3f))
+        {
+            return card.historical_bytes.clone();
+        }
+
         let historical_bytes = if card.historical_bytes.len() > 15 {
             &card.historical_bytes[..15]
         } else {
@@ -371,7 +379,7 @@ mod tests {
         let card = CardPresence {
             uid: vec![0x01, 0x02, 0x03, 0x04],
             protocol: CardProtocol::IsoDep,
-            historical_bytes: b"FIDO_2_0".to_vec(),
+            historical_bytes: vec![0x3b, 0x68, 0x00, 0xff, 0x38, 0x2b, 0x41, 0x52, 0x44, 0x6e, 0x73, 0x73],
         };
 
         let reader = FakeReader {
@@ -391,8 +399,7 @@ mod tests {
                 status, payload, ..
             } => {
                 assert_eq!(status, SlotStatus::ok(IccStatus::Active));
-                assert_eq!(payload[0], 0x3b);
-                assert_eq!(payload[1] & 0x0f, b"FIDO_2_0".len() as u8);
+                assert_eq!(payload, vec![0x3b, 0x68, 0x00, 0xff, 0x38, 0x2b, 0x41, 0x52, 0x44, 0x6e, 0x73, 0x73]);
             }
             other => panic!("unexpected response: {other:?}"),
         }
@@ -403,7 +410,7 @@ mod tests {
         let card = CardPresence {
             uid: vec![0x01, 0x02, 0x03, 0x04],
             protocol: CardProtocol::IsoDep,
-            historical_bytes: b"FIDO_2_0".to_vec(),
+            historical_bytes: vec![0x3b, 0x68, 0x00, 0xff, 0x38, 0x2b, 0x41, 0x52, 0x44, 0x6e, 0x73, 0x73],
         };
 
         let reader = FakeReader {
