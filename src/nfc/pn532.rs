@@ -194,7 +194,7 @@ impl NfcReader for Pn532UartReader {
 
         let historical_bytes = if response.len() > uid_end {
             let ats_len = response[uid_end] as usize;
-            let ats_start = uid_end + 1;
+            let ats_start = uid_end;
             let ats_end = ats_start + ats_len;
             if response.len() >= ats_end {
                 response[ats_start..ats_end].to_vec()

@@ -9,6 +9,10 @@ const T1_PROTOCOL_NUM: u8 = 0x01;
 const DEFAULT_T1_PARAMETERS: [u8; 7] = [0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00];
 const APDU_SELECT_INS: u8 = 0xa4;
 const APDU_SELECT_BY_DF_NAME_P1: u8 = 0x04;
+const ATR_T0_HISTORICAL_BYTES_MASK: u8 = 0x0f;
+const ATR_T0_TA1_PRESENT: u8 = 0x10;
+const ATR_T0_TD1_PRESENT: u8 = 0x80;
+const ATR_TD_T1: u8 = 0x01;
 
 pub struct CcidBridge {
     reader: Box<dyn NfcReader>,
@@ -328,13 +332,19 @@ impl CcidBridge {
             return card.historical_bytes.clone();
         }
 
-        let historical_bytes = if card.historical_bytes.len() > 15 {
-            &card.historical_bytes[..15]
-        } else {
-            &card.historical_bytes
-        };
+        let historical_bytes =
+            if card.historical_bytes.len() > ATR_T0_HISTORICAL_BYTES_MASK as usize {
+                &card.historical_bytes[..15]
+            } else {
+                &card.historical_bytes
+            };
 
-        let mut atr = vec![0x3b, 0x80 | historical_bytes.len() as u8];
+        let mut atr = vec![
+            0x3b,
+            ATR_T0_TA1_PRESENT | ATR_T0_TD1_PRESENT | historical_bytes.len() as u8,
+            0x80,
+            ATR_TD_T1,
+        ];
         atr.extend_from_slice(historical_bytes);
 
         let checksum = atr
@@ -489,6 +499,26 @@ mod tests {
             }
             other => panic!("unexpected response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_pseudo_atr_declares_t1_protocol() {
+        let card = CardPresence {
+            uid: vec![0x27, 0x9c, 0x8b, 0x22, 0x02, 0x8b, 0x9c],
+            protocol: CardProtocol::IsoDep,
+            historical_bytes: vec![
+                0x12, 0x78, 0xb3, 0x84, 0x00, 0x80, 0x73, 0xc0, 0x21, 0xc0, 0x57, 0x59, 0x75, 0x62,
+                0x69, 0x4b, 0x65, 0x79,
+            ],
+        };
+
+        let atr = CcidBridge::build_pseudo_atr(&card);
+
+        assert_eq!(atr[0], 0x3b);
+        assert_eq!(atr[1], 0x9f);
+        assert_eq!(atr[2], 0x80);
+        assert_eq!(atr[3], 0x01);
+        assert_eq!(&atr[4..19], &card.historical_bytes[..15]);
     }
 
     #[test]
