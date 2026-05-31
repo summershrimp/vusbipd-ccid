@@ -9,6 +9,7 @@ const T1_PROTOCOL_NUM: u8 = 0x01;
 const DEFAULT_T1_PARAMETERS: [u8; 7] = [0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00];
 const APDU_SELECT_INS: u8 = 0xa4;
 const APDU_SELECT_BY_DF_NAME_P1: u8 = 0x04;
+const APDU_GET_RESPONSE_INS: u8 = 0xc0;
 const ATR_T0_HISTORICAL_BYTES_MASK: u8 = 0x0f;
 const ATR_T0_TD1_PRESENT: u8 = 0x80;
 const ATR_TD_T0_WITH_TD2: u8 = 0x80;
@@ -233,7 +234,9 @@ impl CcidBridge {
                     debug!(aid = %format_hex(aid), "trying card AID");
                 }
 
-                match self.reader.exchange_apdu(&payload) {
+                let apdu = Self::normalize_apdu_for_exchange(&payload);
+
+                match self.reader.exchange_apdu(apdu.as_slice()) {
                     Ok(response) => CcidResponse::DataBlock {
                         slot,
                         seq,
@@ -369,6 +372,14 @@ impl CcidBridge {
         let aid_end = aid_start + aid_len;
 
         (aid_len > 0 && apdu.len() >= aid_end).then_some(&apdu[aid_start..aid_end])
+    }
+
+    fn normalize_apdu_for_exchange(apdu: &[u8]) -> Vec<u8> {
+        let mut normalized = apdu.to_vec();
+        if normalized.get(1) == Some(&APDU_GET_RESPONSE_INS) {
+            normalized[0] = 0x00;
+        }
+        normalized
     }
 }
 
@@ -554,6 +565,18 @@ mod tests {
         let apdu = [0x00, 0xa4, 0x04, 0x00, 0x03, 0xa0, 0x00, 0x01, 0x00];
 
         assert_eq!(CcidBridge::select_aid(&apdu), Some([0xa0, 0x00, 0x01].as_slice()));
+    }
+
+    #[test]
+    fn normalize_get_response_uses_interindustry_cla() {
+        assert_eq!(
+            CcidBridge::normalize_apdu_for_exchange(&[0x80, 0xc0, 0x00, 0x00, 0x7b]),
+            vec![0x00, 0xc0, 0x00, 0x00, 0x7b]
+        );
+        assert_eq!(
+            CcidBridge::normalize_apdu_for_exchange(&[0x80, 0x10, 0x00, 0x00, 0x01, 0x04, 0x00]),
+            vec![0x80, 0x10, 0x00, 0x00, 0x01, 0x04, 0x00]
+        );
     }
 
     #[test]
