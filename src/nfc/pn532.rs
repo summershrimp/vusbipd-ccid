@@ -29,6 +29,9 @@ const RF_FIELD_OFF: &[u8] = &[0x01, 0x00];
 const PREAMBLE: [u8; 3] = [0x00, 0x00, 0xff];
 const PN532_TO_HOST: u8 = 0xd5;
 const POSTAMBLE: u8 = 0x00;
+const ATS_T0_TA_PRESENT: u8 = 0x10;
+const ATS_T0_TB_PRESENT: u8 = 0x20;
+const ATS_T0_TC_PRESENT: u8 = 0x40;
 
 type Pn532Device = Pn532<SerialPortInterface, SysTimer, PN532_BUFFER_SIZE>;
 
@@ -197,9 +200,12 @@ impl NfcReader for Pn532UartReader {
             let ats_start = uid_end;
             let ats_end = ats_start + ats_len;
             if response.len() >= ats_end {
-                response[ats_start..ats_end].to_vec()
+                ats_historical_bytes(&response[ats_start..ats_end])?
             } else {
-                Vec::new()
+                return Err(ReaderError::Protocol(format!(
+                    "PN532 target response truncated before ATS: {} bytes",
+                    response.len()
+                )));
             }
         } else {
             Vec::new()
@@ -293,6 +299,45 @@ fn format_hex(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join("")
+}
+
+fn ats_historical_bytes(ats: &[u8]) -> Result<Vec<u8>, ReaderError> {
+    if ats.len() < 2 {
+        return Err(ReaderError::Protocol(format!(
+            "ATS too short: {} bytes",
+            ats.len()
+        )));
+    }
+
+    let declared_len = ats[0] as usize;
+    if declared_len != ats.len() {
+        return Err(ReaderError::Protocol(format!(
+            "ATS length mismatch: TL={} actual={}",
+            declared_len,
+            ats.len()
+        )));
+    }
+
+    let t0 = ats[1];
+    let mut historical_start = 2;
+    if t0 & ATS_T0_TA_PRESENT != 0 {
+        historical_start += 1;
+    }
+    if t0 & ATS_T0_TB_PRESENT != 0 {
+        historical_start += 1;
+    }
+    if t0 & ATS_T0_TC_PRESENT != 0 {
+        historical_start += 1;
+    }
+
+    if historical_start > ats.len() {
+        return Err(ReaderError::Protocol(format!(
+            "ATS optional interface bytes exceed TL: TL={} T0=0x{:02x}",
+            declared_len, t0
+        )));
+    }
+
+    Ok(ats[historical_start..].to_vec())
 }
 
 fn map_pn532_error(action: &str, error: Pn532Error<std::io::Error>) -> ReaderError {
@@ -417,5 +462,25 @@ impl Pn532UartReader {
 
     pub fn port_path(&self) -> &PathBuf {
         &self.config.port
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ats_historical_bytes;
+
+    #[test]
+    fn ats_historical_bytes_skip_tl_t0_and_interface_bytes() {
+        let ats = [
+            0x12, 0x78, 0xb3, 0x84, 0x00, 0x80, 0x73, 0xc0, 0x21, 0xc0, 0x57, 0x59, 0x75,
+            0x62, 0x69, 0x4b, 0x65, 0x79,
+        ];
+
+        let historical_bytes = ats_historical_bytes(&ats).expect("ATS must parse");
+
+        assert_eq!(
+            historical_bytes,
+            vec![0x80, 0x73, 0xc0, 0x21, 0xc0, 0x57, 0x59, 0x75, 0x62, 0x69, 0x4b, 0x65, 0x79]
+        );
     }
 }
