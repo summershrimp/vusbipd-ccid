@@ -10,7 +10,7 @@ use pn532::{
     serialport::{SerialPortInterface, SysTimer},
     Error as Pn532Error, IntoDuration, Pn532, Request,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{
     CardPresence, CardProtocol, NfcReader, ReaderCapabilities, ReaderError, ReaderFactory,
@@ -289,7 +289,9 @@ impl NfcReader for Pn532UartReader {
         );
 
         if !exchange_status_keeps_target_active(response[0]) {
-            self.active_target = None;
+            if let Err(error) = self.deactivate_target() {
+                warn!(?error, "failed to deactivate PN532 target after exchange failure");
+            }
             return Err(ReaderError::Protocol(format!(
                 "PN532 reported APDU exchange status 0x{:02x}",
                 response[0]
@@ -480,6 +482,13 @@ fn receive_dynamic_response_from<R: Read>(
 }
 
 impl Pn532UartReader {
+    fn deactivate_target(&mut self) -> Result<(), ReaderError> {
+        self.active_target = None;
+        self.cached_card = None;
+        self.last_poll = None;
+        self.set_rf_field(false)
+    }
+
     fn set_rf_field(&mut self, enabled: bool) -> Result<(), ReaderError> {
         if self.rf_field_enabled == enabled {
             return Ok(());
