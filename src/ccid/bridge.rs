@@ -43,6 +43,12 @@ impl CcidBridge {
                 match self.reader.poll_card() {
                     Ok(Some(card)) => {
                         let atr = Self::build_pseudo_atr(&card);
+                        debug!(
+                            uid = %format_hex(&card.uid),
+                            atr = %format_hex(&atr),
+                            historical_bytes = %format_hex(&card.historical_bytes),
+                            "CCID power on found NFC card"
+                        );
                         self.current_card = Some(card);
                         self.slot_powered = true;
                         CcidResponse::DataBlock {
@@ -55,6 +61,7 @@ impl CcidBridge {
                         }
                     }
                     Ok(None) => {
+                        debug!("CCID power on found no NFC card");
                         self.current_card = None;
                         self.slot_powered = false;
                         CcidResponse::SlotStatus {
@@ -197,6 +204,7 @@ impl CcidBridge {
                 }
 
                 if self.current_card.is_none() {
+                    debug!("CCID APDU exchange blocked: no NFC card present");
                     return CcidResponse::SlotStatus {
                         slot,
                         seq,
@@ -207,6 +215,7 @@ impl CcidBridge {
                 }
 
                 if !self.slot_powered {
+                    debug!("CCID APDU exchange blocked: slot is not powered");
                     return CcidResponse::SlotStatus {
                         slot,
                         seq,

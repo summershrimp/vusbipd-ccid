@@ -147,9 +147,14 @@ impl NfcReader for Pn532UartReader {
             .last_poll
             .is_some_and(|last_poll| now.duration_since(last_poll) < poll_interval)
         {
+            debug!(
+                cached_present = self.cached_card.is_some(),
+                "returning cached PN532 card presence"
+            );
             return Ok(self.cached_card.clone());
         }
 
+        debug!("polling PN532 for ISO14443-A target");
         self.set_rf_field(true)?;
         self.last_poll = Some(now);
 
@@ -164,6 +169,7 @@ impl NfcReader for Pn532UartReader {
             self.active_target = None;
             self.cached_card = None;
             self.set_rf_field(false)?;
+            debug!("PN532 poll found no ISO14443-A target");
             return Ok(None);
         }
 
@@ -206,6 +212,12 @@ impl NfcReader for Pn532UartReader {
             protocol: CardProtocol::IsoDep,
             historical_bytes,
         };
+        debug!(
+            target,
+            uid = %format_hex(&card.uid),
+            historical_bytes = %format_hex(&card.historical_bytes),
+            "PN532 poll found ISO14443-A target"
+        );
         self.cached_card = Some(card.clone());
 
         Ok(Some(card))
