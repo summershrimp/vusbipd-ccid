@@ -1,4 +1,9 @@
-use std::{io::Read, path::PathBuf, thread::sleep, time::Duration};
+use std::{
+    io::Read,
+    path::PathBuf,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 use pn532::{
     requests::{BorrowedRequest, Command, SAMMode},
@@ -14,8 +19,12 @@ const PN532_BUFFER_SIZE: usize = 320;
 const PN532_INIT_TIMEOUT_MS: u64 = 1_000;
 const PN532_POLL_TIMEOUT_MS: u64 = 500;
 const PN532_APDU_TIMEOUT_MS: u64 = 1_000;
+const PN532_POLL_INTERVAL_MS: u64 = 1_000;
+const PN532_ABSENT_POLL_INTERVAL_MS: u64 = 2_000;
 const ISO_A_TARGET_SLOT: u8 = 0x01;
-const RF_MAX_RETRIES: &[u8] = &[0x05, 0x00, 0x00, 0x02];
+const RF_MAX_RETRIES: &[u8] = &[0x05, 0x00, 0x00, 0x00];
+const RF_FIELD_ON: &[u8] = &[0x01, 0x01];
+const RF_FIELD_OFF: &[u8] = &[0x01, 0x00];
 const PREAMBLE: [u8; 3] = [0x00, 0x00, 0xff];
 const PN532_TO_HOST: u8 = 0xd5;
 const POSTAMBLE: u8 = 0x00;
@@ -98,6 +107,9 @@ impl ReaderFactory for Pn532UartFactory {
             config: self.config.clone(),
             pn532,
             active_target: None,
+            cached_card: None,
+            last_poll: None,
+            rf_field_enabled: false,
             firmware_version,
         }))
     }
@@ -107,6 +119,9 @@ pub struct Pn532UartReader {
     config: Pn532UartConfig,
     pn532: Pn532Device,
     active_target: Option<u8>,
+    cached_card: Option<CardPresence>,
+    last_poll: Option<Instant>,
+    rf_field_enabled: bool,
     firmware_version: Vec<u8>,
 }
 
@@ -120,6 +135,23 @@ impl NfcReader for Pn532UartReader {
     }
 
     fn poll_card(&mut self) -> Result<Option<CardPresence>, ReaderError> {
+        let now = Instant::now();
+        let poll_interval = if self.cached_card.is_some() {
+            Duration::from_millis(PN532_POLL_INTERVAL_MS)
+        } else {
+            Duration::from_millis(PN532_ABSENT_POLL_INTERVAL_MS)
+        };
+
+        if self
+            .last_poll
+            .is_some_and(|last_poll| now.duration_since(last_poll) < poll_interval)
+        {
+            return Ok(self.cached_card.clone());
+        }
+
+        self.set_rf_field(true)?;
+        self.last_poll = Some(now);
+
         let response = process_dynamic_response(
             &mut self.pn532,
             (&Request::INLIST_ONE_ISO_A_TARGET).into(),
@@ -129,6 +161,8 @@ impl NfcReader for Pn532UartReader {
 
         if response.is_empty() || response[0] == 0 {
             self.active_target = None;
+            self.cached_card = None;
+            self.set_rf_field(false)?;
             return Ok(None);
         }
 
@@ -166,15 +200,19 @@ impl NfcReader for Pn532UartReader {
 
         self.active_target = Some(target);
 
-        Ok(Some(CardPresence {
+        let card = CardPresence {
             uid: response[uid_start..uid_end].to_vec(),
             protocol: CardProtocol::IsoDep,
             historical_bytes,
-        }))
+        };
+        self.cached_card = Some(card.clone());
+
+        Ok(Some(card))
     }
 
     fn power_off(&mut self) -> Result<(), ReaderError> {
         self.active_target = None;
+        self.set_rf_field(false)?;
         Ok(())
     }
 
@@ -321,6 +359,24 @@ fn receive_dynamic_response(
 }
 
 impl Pn532UartReader {
+    fn set_rf_field(&mut self, enabled: bool) -> Result<(), ReaderError> {
+        if self.rf_field_enabled == enabled {
+            return Ok(());
+        }
+
+        let data = if enabled { RF_FIELD_ON } else { RF_FIELD_OFF };
+        self.pn532
+            .process(
+                BorrowedRequest::new(Command::RFConfiguration, data),
+                0,
+                PN532_INIT_TIMEOUT_MS.ms(),
+            )
+            .map_err(|error| map_pn532_error("set PN532 RF field state", error))?;
+
+        self.rf_field_enabled = enabled;
+        Ok(())
+    }
+
     pub fn firmware_version(&self) -> &[u8] {
         &self.firmware_version
     }
