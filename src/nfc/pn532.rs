@@ -147,9 +147,14 @@ impl NfcReader for Pn532UartReader {
             Duration::from_millis(PN532_ABSENT_POLL_INTERVAL_MS)
         };
 
-        if self
+        let recently_polled = self
             .last_poll
-            .is_some_and(|last_poll| now.duration_since(last_poll) < poll_interval)
+            .is_some_and(|last_poll| now.duration_since(last_poll) < poll_interval);
+        if can_return_cached_presence(
+            self.cached_card.is_some(),
+            self.active_target.is_some(),
+            recently_polled,
+        )
         {
             debug!(
                 cached_present = self.cached_card.is_some(),
@@ -300,6 +305,14 @@ fn format_hex(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join("")
+}
+
+fn can_return_cached_presence(
+    card_cached: bool,
+    target_active: bool,
+    recently_polled: bool,
+) -> bool {
+    recently_polled && (!card_cached || target_active)
 }
 
 fn ats_historical_bytes(ats: &[u8]) -> Result<Vec<u8>, ReaderError> {
@@ -491,7 +504,10 @@ impl Pn532UartReader {
 
 #[cfg(test)]
 mod tests {
-    use super::{ats_historical_bytes, receive_dynamic_response_from, PN532_TO_HOST};
+    use super::{
+        ats_historical_bytes, can_return_cached_presence, receive_dynamic_response_from,
+        PN532_TO_HOST,
+    };
 
     #[test]
     fn ats_historical_bytes_skip_tl_t0_and_interface_bytes() {
@@ -506,6 +522,14 @@ mod tests {
             historical_bytes,
             vec![0x80, 0x73, 0xc0, 0x21, 0xc0, 0x57, 0x59, 0x75, 0x62, 0x69, 0x4b, 0x65, 0x79]
         );
+    }
+
+    #[test]
+    fn cached_present_card_requires_active_target() {
+        assert!(!can_return_cached_presence(true, false, true));
+        assert!(can_return_cached_presence(true, true, true));
+        assert!(can_return_cached_presence(false, false, true));
+        assert!(!can_return_cached_presence(true, true, false));
     }
 
     #[test]
