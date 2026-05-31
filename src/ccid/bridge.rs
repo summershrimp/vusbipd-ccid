@@ -10,8 +10,8 @@ const DEFAULT_T1_PARAMETERS: [u8; 7] = [0x11, 0x10, 0x00, 0x15, 0x00, 0xfe, 0x00
 const APDU_SELECT_INS: u8 = 0xa4;
 const APDU_SELECT_BY_DF_NAME_P1: u8 = 0x04;
 const ATR_T0_HISTORICAL_BYTES_MASK: u8 = 0x0f;
-const ATR_T0_TA1_PRESENT: u8 = 0x10;
 const ATR_T0_TD1_PRESENT: u8 = 0x80;
+const ATR_TD_T0_WITH_TD2: u8 = 0x80;
 const ATR_TD_T1: u8 = 0x01;
 
 pub struct CcidBridge {
@@ -341,8 +341,8 @@ impl CcidBridge {
 
         let mut atr = vec![
             0x3b,
-            ATR_T0_TA1_PRESENT | ATR_T0_TD1_PRESENT | historical_bytes.len() as u8,
-            0x80,
+            ATR_T0_TD1_PRESENT | historical_bytes.len() as u8,
+            ATR_TD_T0_WITH_TD2,
             ATR_TD_T1,
         ];
         atr.extend_from_slice(historical_bytes);
@@ -515,7 +515,7 @@ mod tests {
         let atr = CcidBridge::build_pseudo_atr(&card);
 
         assert_eq!(atr[0], 0x3b);
-        assert_eq!(atr[1], 0x9f);
+        assert_eq!(atr[1], 0x8f);
         assert_eq!(atr[2], 0x80);
         assert_eq!(atr[3], 0x01);
         assert_eq!(&atr[4..19], &card.historical_bytes[..15]);
