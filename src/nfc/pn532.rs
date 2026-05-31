@@ -1,9 +1,9 @@
-use std::{path::PathBuf, time::Duration};
+use std::{io::Read, path::PathBuf, thread::sleep, time::Duration};
 
 use pn532::{
-    Error as Pn532Error, IntoDuration, Pn532, Request,
     requests::{BorrowedRequest, Command, SAMMode},
     serialport::{SerialPortInterface, SysTimer},
+    Error as Pn532Error, IntoDuration, Pn532, Request,
 };
 
 use super::{
@@ -11,12 +11,14 @@ use super::{
 };
 
 const PN532_BUFFER_SIZE: usize = 320;
-const PN532_INIT_TIMEOUT_MS: u64 = 100;
+const PN532_INIT_TIMEOUT_MS: u64 = 1_000;
 const PN532_POLL_TIMEOUT_MS: u64 = 500;
 const PN532_APDU_TIMEOUT_MS: u64 = 1_000;
-const PN532_POLL_RESPONSE_LEN: usize = 48;
-const PN532_APDU_RESPONSE_LEN: usize = 280;
 const ISO_A_TARGET_SLOT: u8 = 0x01;
+const RF_MAX_RETRIES: &[u8] = &[0x05, 0x00, 0x00, 0x02];
+const PREAMBLE: [u8; 3] = [0x00, 0x00, 0xff];
+const PN532_TO_HOST: u8 = 0xd5;
+const POSTAMBLE: u8 = 0x00;
 
 type Pn532Device = Pn532<SerialPortInterface, SysTimer, PN532_BUFFER_SIZE>;
 
@@ -50,7 +52,7 @@ impl ReaderFactory for Pn532UartFactory {
 
         let port_name = self.config.port.to_string_lossy().into_owned();
         let serial_port = serialport::new(&port_name, self.config.baud_rate)
-            .timeout(Duration::from_millis(PN532_INIT_TIMEOUT_MS))
+            .timeout(Duration::from_millis(PN532_APDU_TIMEOUT_MS))
             .open()
             .map_err(|error| {
                 ReaderError::Transport(format!(
@@ -58,7 +60,11 @@ impl ReaderFactory for Pn532UartFactory {
                 ))
             })?;
 
-        let interface = SerialPortInterface { port: serial_port };
+        let mut interface = SerialPortInterface { port: serial_port };
+        interface.send_wakeup_message().map_err(|error| {
+            ReaderError::Transport(format!("failed to wake PN532 on {port_name}: {error}"))
+        })?;
+
         let mut pn532 = Pn532::new(interface, SysTimer::new());
 
         pn532
@@ -79,6 +85,14 @@ impl ReaderFactory for Pn532UartFactory {
                 .map_err(|error| map_pn532_error("read firmware version", error))?;
             firmware.to_vec()
         };
+
+        pn532
+            .process(
+                BorrowedRequest::new(Command::RFConfiguration, RF_MAX_RETRIES),
+                0,
+                PN532_INIT_TIMEOUT_MS.ms(),
+            )
+            .map_err(|error| map_pn532_error("configure RF retries", error))?;
 
         Ok(Box::new(Pn532UartReader {
             config: self.config.clone(),
@@ -106,14 +120,12 @@ impl NfcReader for Pn532UartReader {
     }
 
     fn poll_card(&mut self) -> Result<Option<CardPresence>, ReaderError> {
-        let response = self
-            .pn532
-            .process(
-                &Request::INLIST_ONE_ISO_A_TARGET,
-                PN532_POLL_RESPONSE_LEN,
-                PN532_POLL_TIMEOUT_MS.ms(),
-            )
-            .map_err(|error| map_pn532_error("poll for ISO14443A target", error))?;
+        let response = process_dynamic_response(
+            &mut self.pn532,
+            (&Request::INLIST_ONE_ISO_A_TARGET).into(),
+            PN532_POLL_TIMEOUT_MS,
+        )
+        .map_err(|error| map_pn532_error("poll for ISO14443A target", error))?;
 
         if response.is_empty() || response[0] == 0 {
             self.active_target = None;
@@ -191,9 +203,7 @@ impl NfcReader for Pn532UartReader {
         request_data.extend_from_slice(apdu);
 
         let request = BorrowedRequest::new(Command::InDataExchange, &request_data);
-        let response = self
-            .pn532
-            .process(request, PN532_APDU_RESPONSE_LEN, PN532_APDU_TIMEOUT_MS.ms())
+        let response = process_dynamic_response(&mut self.pn532, request, PN532_APDU_TIMEOUT_MS)
             .map_err(|error| map_pn532_error("exchange APDU with NFC target", error))?;
 
         if response.is_empty() {
@@ -236,6 +246,78 @@ fn map_pn532_error(action: &str, error: Pn532Error<std::io::Error>) -> ReaderErr
         )),
         Pn532Error::InterfaceError(inner) => ReaderError::Io(inner.to_string()),
     }
+}
+
+fn process_dynamic_response(
+    pn532: &mut Pn532Device,
+    request: BorrowedRequest<'_>,
+    timeout_ms: u64,
+) -> Result<Vec<u8>, Pn532Error<std::io::Error>> {
+    let expected_response_command = request.command as u8 + 1;
+
+    pn532.send(request)?;
+    if !wait_serial_ready(pn532, timeout_ms).map_err(Pn532Error::InterfaceError)? {
+        return Err(Pn532Error::TimeoutAck);
+    }
+    pn532.receive_ack()?;
+    if !wait_serial_ready(pn532, timeout_ms).map_err(Pn532Error::InterfaceError)? {
+        return Err(Pn532Error::TimeoutResponse);
+    }
+    receive_dynamic_response(pn532, expected_response_command)
+}
+
+fn wait_serial_ready(pn532: &mut Pn532Device, timeout_ms: u64) -> std::io::Result<bool> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if pn532.interface.port.bytes_to_read()? > 0 {
+            return Ok(true);
+        }
+        sleep(Duration::from_millis(5));
+    }
+
+    Ok(false)
+}
+
+fn receive_dynamic_response(
+    pn532: &mut Pn532Device,
+    expected_response_command: u8,
+) -> Result<Vec<u8>, Pn532Error<std::io::Error>> {
+    let mut header = [0; 5];
+    pn532.interface.port.read_exact(&mut header)?;
+
+    if header[..3] != PREAMBLE {
+        return Err(Pn532Error::BadResponseFrame);
+    }
+
+    let frame_len = header[3];
+    if frame_len.wrapping_add(header[4]) != 0 {
+        return Err(Pn532Error::CrcError);
+    }
+    if frame_len == 0 {
+        return Err(Pn532Error::BadResponseFrame);
+    }
+    if frame_len == 1 {
+        return Err(Pn532Error::Syntax);
+    }
+
+    let mut frame = vec![0; frame_len as usize + 2];
+    pn532.interface.port.read_exact(&mut frame)?;
+
+    if frame[frame.len() - 1] != POSTAMBLE {
+        return Err(Pn532Error::BadResponseFrame);
+    }
+    if frame[0] != PN532_TO_HOST || frame[1] != expected_response_command {
+        return Err(Pn532Error::BadResponseFrame);
+    }
+
+    let checksum = frame[..frame.len() - 1]
+        .iter()
+        .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+    if checksum != 0 {
+        return Err(Pn532Error::CrcError);
+    }
+
+    Ok(frame[2..frame.len() - 2].to_vec())
 }
 
 impl Pn532UartReader {
