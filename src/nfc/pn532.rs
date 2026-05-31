@@ -10,6 +10,7 @@ use pn532::{
     serialport::{SerialPortInterface, SysTimer},
     Error as Pn532Error, IntoDuration, Pn532, Request,
 };
+use tracing::debug;
 
 use super::{
     CardPresence, CardProtocol, NfcReader, ReaderCapabilities, ReaderError, ReaderFactory,
@@ -236,6 +237,12 @@ impl NfcReader for Pn532UartReader {
             },
         };
 
+        debug!(
+            target,
+            apdu = %format_hex(apdu),
+            "exchanging APDU through PN532"
+        );
+
         let mut request_data = Vec::with_capacity(apdu.len() + 1);
         request_data.push(target);
         request_data.extend_from_slice(apdu);
@@ -250,6 +257,13 @@ impl NfcReader for Pn532UartReader {
             ));
         }
 
+        debug!(
+            target,
+            pn532_status = format_args!("0x{:02x}", response[0]),
+            response = %format_hex(&response[1..]),
+            "received APDU response through PN532"
+        );
+
         if response[0] != 0x00 {
             return Err(ReaderError::Protocol(format!(
                 "PN532 reported APDU exchange status 0x{:02x}",
@@ -259,6 +273,14 @@ impl NfcReader for Pn532UartReader {
 
         Ok(response[1..].to_vec())
     }
+}
+
+fn format_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn map_pn532_error(action: &str, error: Pn532Error<std::io::Error>) -> ReaderError {
