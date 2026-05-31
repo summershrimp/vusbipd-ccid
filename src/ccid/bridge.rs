@@ -290,6 +290,10 @@ impl CcidBridge {
     }
 
     pub fn refresh_card_presence(&mut self) -> Result<bool, crate::nfc::ReaderError> {
+        if self.slot_powered && self.current_card.is_some() {
+            return Ok(true);
+        }
+
         let card = self.reader.poll_card()?;
         if card.is_none() {
             self.slot_powered = false;
@@ -476,6 +480,31 @@ mod tests {
             }
             other => panic!("unexpected response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn refresh_does_not_poll_while_powered_card_is_connected() {
+        let card = CardPresence {
+            uid: vec![0x01, 0x02, 0x03, 0x04],
+            protocol: CardProtocol::IsoDep,
+            historical_bytes: vec![0x3b, 0x68, 0x00, 0xff],
+        };
+
+        let reader = FakeReader {
+            poll_results: VecDeque::from([Ok(Some(card)), Ok(None)]),
+            exchange_result: Ok(vec![0x90, 0x00]),
+        };
+        let mut bridge = CcidBridge::new(Box::new(reader));
+
+        let _ = bridge.handle_command(CcidCommand::IccPowerOn {
+            slot: 0,
+            seq: 1,
+            power_select: 0,
+        });
+
+        assert!(bridge.refresh_card_presence().expect("refresh must succeed"));
+        assert!(bridge.card_present());
+        assert_eq!(bridge.current_icc_status(), IccStatus::Active);
     }
 
     #[test]
