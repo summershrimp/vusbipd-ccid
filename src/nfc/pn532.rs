@@ -29,6 +29,7 @@ const RF_FIELD_OFF: &[u8] = &[0x01, 0x00];
 const PREAMBLE: [u8; 3] = [0x00, 0x00, 0xff];
 const PN532_TO_HOST: u8 = 0xd5;
 const POSTAMBLE: u8 = 0x00;
+const EXTENDED_FRAME_MARKER: [u8; 2] = [0xff, 0xff];
 const ATS_T0_TA_PRESENT: u8 = 0x10;
 const ATS_T0_TB_PRESENT: u8 = 0x20;
 const ATS_T0_TC_PRESENT: u8 = 0x40;
@@ -399,17 +400,40 @@ fn receive_dynamic_response(
     pn532: &mut Pn532Device,
     expected_response_command: u8,
 ) -> Result<Vec<u8>, Pn532Error<std::io::Error>> {
+    receive_dynamic_response_from(&mut pn532.interface.port, expected_response_command)
+}
+
+fn receive_dynamic_response_from<R: Read>(
+    reader: &mut R,
+    expected_response_command: u8,
+) -> Result<Vec<u8>, Pn532Error<std::io::Error>> {
     let mut header = [0; 5];
-    pn532.interface.port.read_exact(&mut header)?;
+    reader.read_exact(&mut header)?;
 
     if header[..3] != PREAMBLE {
         return Err(Pn532Error::BadResponseFrame);
     }
 
-    let frame_len = header[3];
-    if frame_len.wrapping_add(header[4]) != 0 {
-        return Err(Pn532Error::CrcError);
-    }
+    let frame_len = if header[3..5] == EXTENDED_FRAME_MARKER {
+        let mut extended_header = [0; 3];
+        reader.read_exact(&mut extended_header)?;
+        let frame_len = u16::from_be_bytes([extended_header[0], extended_header[1]]);
+        if extended_header[0]
+            .wrapping_add(extended_header[1])
+            .wrapping_add(extended_header[2])
+            != 0
+        {
+            return Err(Pn532Error::CrcError);
+        }
+        frame_len as usize
+    } else {
+        let frame_len = header[3];
+        if frame_len.wrapping_add(header[4]) != 0 {
+            return Err(Pn532Error::CrcError);
+        }
+        frame_len as usize
+    };
+
     if frame_len == 0 {
         return Err(Pn532Error::BadResponseFrame);
     }
@@ -417,8 +441,8 @@ fn receive_dynamic_response(
         return Err(Pn532Error::Syntax);
     }
 
-    let mut frame = vec![0; frame_len as usize + 2];
-    pn532.interface.port.read_exact(&mut frame)?;
+    let mut frame = vec![0; frame_len + 2];
+    reader.read_exact(&mut frame)?;
 
     if frame[frame.len() - 1] != POSTAMBLE {
         return Err(Pn532Error::BadResponseFrame);
@@ -467,7 +491,7 @@ impl Pn532UartReader {
 
 #[cfg(test)]
 mod tests {
-    use super::ats_historical_bytes;
+    use super::{ats_historical_bytes, receive_dynamic_response_from, PN532_TO_HOST};
 
     #[test]
     fn ats_historical_bytes_skip_tl_t0_and_interface_bytes() {
@@ -482,5 +506,33 @@ mod tests {
             historical_bytes,
             vec![0x80, 0x73, 0xc0, 0x21, 0xc0, 0x57, 0x59, 0x75, 0x62, 0x69, 0x4b, 0x65, 0x79]
         );
+    }
+
+    #[test]
+    fn receive_dynamic_response_parses_extended_frames() {
+        let expected_command = 0x41;
+        let payload = vec![0xa5; 260];
+        let frame_len = payload.len() + 2;
+        let frame_len_bytes = (frame_len as u16).to_be_bytes();
+
+        let mut frame = vec![0x00, 0x00, 0xff, 0xff, 0xff];
+        frame.extend_from_slice(&frame_len_bytes);
+        frame.push(
+            0u8.wrapping_sub(frame_len_bytes[0].wrapping_add(frame_len_bytes[1])),
+        );
+        frame.push(PN532_TO_HOST);
+        frame.push(expected_command);
+        frame.extend_from_slice(&payload);
+
+        let data_checksum = frame[8..]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        frame.push(0u8.wrapping_sub(data_checksum));
+        frame.push(0x00);
+
+        let parsed = receive_dynamic_response_from(&mut frame.as_slice(), expected_command)
+            .expect("extended frame must parse");
+
+        assert_eq!(parsed, payload);
     }
 }
