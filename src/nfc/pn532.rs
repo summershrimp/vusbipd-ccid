@@ -254,7 +254,7 @@ impl NfcReader for Pn532UartReader {
             None => match self.poll_card()? {
                 Some(_) => self.active_target.unwrap_or(ISO_A_TARGET_SLOT),
                 None => {
-                    return Err(ReaderError::Protocol(
+                    return Err(ReaderError::TargetLost(
                         "cannot exchange APDU because no NFC target is present".to_string(),
                     ));
                 }
@@ -292,7 +292,7 @@ impl NfcReader for Pn532UartReader {
             if let Err(error) = self.deactivate_target() {
                 warn!(?error, "failed to deactivate PN532 target after exchange failure");
             }
-            return Err(ReaderError::Protocol(format!(
+            return Err(ReaderError::TargetLost(format!(
                 "PN532 reported APDU exchange status 0x{:02x}",
                 response[0]
             )));

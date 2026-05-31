@@ -48,6 +48,8 @@ pub enum ReaderError {
     Transport(String),
     #[error("reader protocol error: {0}")]
     Protocol(String),
+    #[error("NFC target lost: {0}")]
+    TargetLost(String),
     #[error("reader feature is not implemented yet: {0}")]
     Unsupported(String),
     #[error("reader I/O error: {0}")]

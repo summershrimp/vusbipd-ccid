@@ -1,6 +1,6 @@
 use tracing::{debug, warn};
 
-use crate::nfc::{CardPresence, NfcReader};
+use crate::nfc::{CardPresence, NfcReader, ReaderError};
 
 use super::protocol::{CcidCommand, CcidResponse, CommandStatus, IccStatus, SlotStatus};
 
@@ -245,6 +245,18 @@ impl CcidBridge {
                         chain_parameter: 0,
                         payload: response,
                     },
+                    Err(ReaderError::TargetLost(message)) => {
+                        debug!(message, "NFC target lost during APDU exchange");
+                        self.current_card = None;
+                        self.slot_powered = false;
+                        CcidResponse::SlotStatus {
+                            slot,
+                            seq,
+                            status: SlotStatus::failed(IccStatus::NotPresent),
+                            error: GENERIC_FAILURE_ERROR,
+                            clock_status: 0,
+                        }
+                    }
                     Err(error) => {
                         warn!(?error, "NFC APDU exchange failed");
                         CcidResponse::SlotStatus {
@@ -516,6 +528,43 @@ mod tests {
         assert!(bridge.refresh_card_presence().expect("refresh must succeed"));
         assert!(bridge.card_present());
         assert_eq!(bridge.current_icc_status(), IccStatus::Active);
+    }
+
+    #[test]
+    fn target_lost_during_apdu_marks_card_not_present() {
+        let card = CardPresence {
+            uid: vec![0x01, 0x02, 0x03, 0x04],
+            protocol: CardProtocol::IsoDep,
+            historical_bytes: vec![0x3b, 0x68, 0x00, 0xff],
+        };
+
+        let reader = FakeReader {
+            poll_results: VecDeque::from([Ok(Some(card))]),
+            exchange_result: Err(ReaderError::TargetLost("target lost".to_string())),
+        };
+        let mut bridge = CcidBridge::new(Box::new(reader));
+
+        let _ = bridge.handle_command(CcidCommand::IccPowerOn {
+            slot: 0,
+            seq: 1,
+            power_select: 0,
+        });
+        let response = bridge.handle_command(CcidCommand::XfrBlock {
+            slot: 0,
+            seq: 2,
+            bwi: 0,
+            level_parameter: 0,
+            payload: vec![0x00, 0xa4, 0x04, 0x00],
+        });
+
+        match response {
+            CcidResponse::SlotStatus { status, .. } => {
+                assert_eq!(status, SlotStatus::failed(IccStatus::NotPresent));
+                assert!(!bridge.card_present());
+                assert_eq!(bridge.current_icc_status(), IccStatus::NotPresent);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     #[test]
