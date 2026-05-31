@@ -288,7 +288,8 @@ impl NfcReader for Pn532UartReader {
             "received APDU response through PN532"
         );
 
-        if response[0] != 0x00 {
+        if !exchange_status_keeps_target_active(response[0]) {
+            self.active_target = None;
             return Err(ReaderError::Protocol(format!(
                 "PN532 reported APDU exchange status 0x{:02x}",
                 response[0]
@@ -313,6 +314,10 @@ fn can_return_cached_presence(
     recently_polled: bool,
 ) -> bool {
     recently_polled && (!card_cached || target_active)
+}
+
+fn exchange_status_keeps_target_active(status: u8) -> bool {
+    status == 0x00
 }
 
 fn ats_historical_bytes(ats: &[u8]) -> Result<Vec<u8>, ReaderError> {
@@ -505,8 +510,8 @@ impl Pn532UartReader {
 #[cfg(test)]
 mod tests {
     use super::{
-        ats_historical_bytes, can_return_cached_presence, receive_dynamic_response_from,
-        PN532_TO_HOST,
+        ats_historical_bytes, can_return_cached_presence, exchange_status_keeps_target_active,
+        receive_dynamic_response_from, PN532_TO_HOST,
     };
 
     #[test]
@@ -530,6 +535,13 @@ mod tests {
         assert!(can_return_cached_presence(true, true, true));
         assert!(can_return_cached_presence(false, false, true));
         assert!(!can_return_cached_presence(true, true, false));
+    }
+
+    #[test]
+    fn nonzero_exchange_status_invalidates_target() {
+        assert!(exchange_status_keeps_target_active(0x00));
+        assert!(!exchange_status_keeps_target_active(0x01));
+        assert!(!exchange_status_keeps_target_active(0x0b));
     }
 
     #[test]
